@@ -65,6 +65,64 @@ def test_job_dry_run_lists_rows_without_ncbi(monkeypatch):
     assert "RID 최대 대기" in page.text
 
 
+def test_local_job_returns_template_fill(monkeypatch):
+    seq = "ACGT" * 20
+
+    def local_only(*_a, **_k):
+        return {
+            0: {
+                "rid": "local:ITS_RefSeq_Fungi",
+                "rid_url": "",
+                "backend": "local",
+                "db": "ITS_RefSeq_Fungi",
+                "source": "로컬 BLAST+ (ITS_RefSeq_Fungi)",
+                "qlen": len(seq),
+                "hits": [{
+                    "name": "Pyxine testensis",
+                    "taxid": 4123,
+                    "title": "Pyxine testensis",
+                    "max_s": "300",
+                    "total_s": "300",
+                    "qc_s": "100%",
+                    "e_s": "0.0",
+                    "pi_s": "100.00%",
+                    "acc_len": len(seq),
+                    "accession": "SYN1.1",
+                    "max": 300,
+                    "total": 300,
+                    "qc": 1,
+                    "evalue": 0,
+                    "pi": 1,
+                }],
+                "lineage": "Fungi",
+                "params": {},
+            }
+        }
+
+    monkeypatch.setattr("blastid.pipeline.run_blast", local_only)
+
+    def no_network(_self, _ids):
+        return {}
+
+    monkeypatch.setattr("blastid.ncbi.NCBI.taxonomy", no_network)
+    client = TestClient(create_app())
+    started = client.post(
+        "/api/jobs",
+        json={"rows": [{"row": 2, "id": "Synth1", "seq": seq, "bold": False, "name": ""}], "backend": "local"},
+    )
+    assert started.status_code == 200
+    body = None
+    for _ in range(40):
+        body = client.get(f"/api/jobs/{started.json()['id']}").json()
+        if body["status"] in {"done", "error"}:
+            break
+        time.sleep(0.05)
+    assert body["status"] == "done", body
+    update = body["result"]["updates"][0]
+    assert update["backend"] == "local"
+    assert update["fill"] == "D6E3F0"
+
+
 def test_missing_addin_fails_at_startup(monkeypatch):
     monkeypatch.delenv("BLASTID_ADDIN", raising=False)
     real = Path.is_file

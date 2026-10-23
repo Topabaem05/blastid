@@ -46,6 +46,14 @@ RETRY_HTTP = {429, 500, 502, 503, 504}
 DEFAULT_MAX_WAIT = 60 * 60
 
 
+def format_wait(seconds: float) -> str:
+    """1분 미만은 초, 그 이상은 분."""
+    seconds = max(0.0, float(seconds))
+    if seconds < 60:
+        return f"{int(round(seconds))}초"
+    return f"{int(round(seconds / 60.0))}분"
+
+
 class NcbiWaitTimeout(RuntimeError):
     """RID가 최대 대기 시간 동안 READY가 되지 않았다."""
 
@@ -56,7 +64,7 @@ class NcbiWaitTimeout(RuntimeError):
         links = ", ".join(WEB_LINK.format(rid=rid) for rid in self.rids)
         reuse = ",".join(self.rids)
         super().__init__(
-            f"RID {', '.join(self.rids)} 가 {waited_min:.0f}분 동안 READY가 되지 않았습니다. "
+            f"RID {', '.join(self.rids)} 가 {format_wait(waited_min * 60.0)} 동안 READY가 되지 않았습니다. "
             f"NCBI 페이지: {links}  "
             f"나중에 이어서 보려면 --reuse-rids {reuse}"
         )
@@ -198,12 +206,6 @@ class NCBI:
             nxt = []
             for rid, (t0, rtoe) in list(pending.items()):
                 if now - t0 >= max_wait:
-                    waited = (now - t0) / 60.0
-                    url = WEB_LINK.format(rid=rid)
-                    self.log(
-                        f"  RID {rid}: 대기 {waited:.0f}분 초과. {url}  "
-                        f"나중에 --reuse-rids {rid}"
-                    )
                     timed_out.append(rid)
                     del pending[rid]
                     continue

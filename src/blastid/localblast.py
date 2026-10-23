@@ -163,6 +163,73 @@ def _sciname(defn: str) -> str:
     return (defn or "").strip()
 
 
+def _first_taxid(text: str) -> int | None:
+    for part in (text or "").split(";"):
+        part = part.strip()
+        if part.isdigit() and int(part) > 0:
+            return int(part)
+    return None
+
+
+def _tax_name(text: str) -> str:
+    name = (text or "").split(";")[0].strip()
+    if not name or name.upper() == "N/A":
+        return ""
+    return name
+
+
+def parse_tax_table(text: str) -> dict[str, tuple[int | None, str]]:
+    """outfmt 6 `qseqid sacc staxids sscinames` → accession별 (taxid, 학명)."""
+    found: dict[str, tuple[int | None, str]] = {}
+    for line in text.splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        parts = line.rstrip("\n").split("\t")
+        if len(parts) < 4:
+            continue
+        acc = parts[1].split()[0]
+        info = (_first_taxid(parts[2]), _tax_name(parts[3]))
+        found.setdefault(acc, info)
+        bare = acc.split(".")[0]
+        if bare:
+            found.setdefault(bare, info)
+    return found
+
+
+def apply_subject_taxonomy(results: dict, _queries: list[dict], table_text: str) -> None:
+    """표의 staxids·sscinames로 taxid와 학명을 채운다. 학명이 있으면 설명문 파싱을 덮어쓴다."""
+    table = parse_tax_table(table_text)
+    for result in results.values():
+        for hit in result.get("hits") or []:
+            acc = str(hit.get("accession") or "")
+            info = table.get(acc) or table.get(acc.split(".")[0])
+            if not info:
+                continue
+            taxid, name = info
+            if taxid:
+                hit["taxid"] = taxid
+            if name:
+                hit["name"] = name
+
+
+def _blastdb_env(db_parent: Path) -> str:
+    """서열 DB 폴더와 taxdb가 있는 폴더를 BLASTDB에 같이 넣는다."""
+    raws = [str(db_parent), os.environ.get("BLASTDB", ""), str(db_dir())]
+    cfg = load_config().get("db_dir")
+    if cfg:
+        raws.append(str(cfg))
+    parts = []
+    seen = set()
+    for raw in raws:
+        for piece in str(raw).split(os.pathsep):
+            piece = piece.strip()
+            if not piece or piece in seen or not Path(piece).is_dir():
+                continue
+            seen.add(piece)
+            parts.append(piece)
+    return os.pathsep.join(parts)
+
+
 def _versioned(hit_id: str, accession: str) -> str:
     for text in (hit_id or "", accession or ""):
         token = text.split("|")[-2] if text.count("|") >= 2 else text
@@ -232,7 +299,7 @@ def xml_to_results(xml_text: str, queries: list[dict], db: str) -> dict:
     return out
 
 
-def blastn_command(blastn: str, query: Path, db: Path, out: Path) -> list[str]:
+def blastn_command(blastn: str, query: Path, db: Path, out: Path, outfmt: str = "5") -> list[str]:
     return [
         blastn,
         "-task", "megablast",
@@ -248,9 +315,12 @@ def blastn_command(blastn: str, query: Path, db: Path, out: Path) -> list[str]:
         "-evalue", "0.05",
         "-max_target_seqs", "100",
         "-max_hsps", "100",
-        "-outfmt", "5",
+        "-outfmt", outfmt,
         "-out", str(out),
     ]
+
+
+TAX_OUTFMT = "6 qseqid sacc staxids sscinames"
 
 
 def run_local(queries: list[dict], db: str, outdir: Path, log=print, blastn: str | None = None) -> dict:
@@ -264,26 +334,41 @@ def run_local(queries: list[dict], db: str, outdir: Path, log=print, blastn: str
     fasta = raw / "local_query.fasta"
     fasta.write_text("".join(f">{q['label']}\n{q['seq']}\n" for q in queries), encoding="utf-8")
     xml_path = raw / "local.xml"
+    tax_path = raw / "local_tax.tsv"
     env = os.environ.copy()
-    env["BLASTDB"] = str(resolved.parent)
-    cmd = blastn_command(program, fasta, resolved, xml_path)
+    env["BLASTDB"] = _blastdb_env(resolved.parent)
     log(f"로컬 BLAST+ ({resolved.name}) {len(queries)}개 서열")
+    _run_blast(blastn_command(program, fasta, resolved, xml_path), env)
+    _run_blast(blastn_command(program, fasta, resolved, tax_path, TAX_OUTFMT), env)
+    results = xml_to_results(xml_path.read_text(encoding="utf-8", errors="replace"), queries, str(resolved))
+    apply_subject_taxonomy(results, queries, tax_path.read_text(encoding="utf-8", errors="replace"))
+    return results
+
+
+def _run_blast(cmd: list[str], env: dict) -> None:
     proc = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=3600)
     if proc.returncode != 0:
         tail = (proc.stderr or proc.stdout or "").strip().splitlines()
         detail = tail[-1] if tail else f"exit {proc.returncode}"
         raise RuntimeError(f"로컬 blastn 실패: {detail}")
-    return xml_to_results(xml_path.read_text(encoding="utf-8", errors="replace"), queries, str(resolved))
 
 
-def make_local_db(fasta: Path, out_prefix: Path, blastn: str | None = None) -> Path:
+def make_local_db(
+    fasta: Path,
+    out_prefix: Path,
+    blastn: str | None = None,
+    taxid_map: Path | None = None,
+) -> Path:
     """사용자 FASTA로 makeblastdb. 헤더는 ACC.1 학명 형태를 권장."""
     program = find_makeblastdb(find_blastn(blastn))
     if not program:
         raise LocalBlastUnavailable(missing_message(str(out_prefix), find_blastn(blastn)))
     out_prefix.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [program, "-in", str(fasta), "-dbtype", "nucl", "-parse_seqids", "-out", str(out_prefix)]
+    if taxid_map:
+        cmd.extend(["-taxid_map", str(taxid_map)])
     proc = subprocess.run(
-        [program, "-in", str(fasta), "-dbtype", "nucl", "-parse_seqids", "-out", str(out_prefix)],
+        cmd,
         capture_output=True,
         text=True,
         timeout=3600,

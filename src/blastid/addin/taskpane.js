@@ -212,7 +212,8 @@ async function writeResults(result) {
     for (const update of updates) {
       const r = update.row - 1;
       const local = update.backend === "local" || String(update.rid || "").startsWith("local");
-      const fill = update.level === "strange" ? FILL.strange : update.level === "ambiguous" ? FILL.ambiguous : local ? "#D6E3F0" : FILL.ok;
+      const fallback = update.level === "strange" ? FILL.strange : update.level === "ambiguous" ? FILL.ambiguous : local ? "#D6E3F0" : FILL.ok;
+      const fill = update.fill ? `#${String(update.fill).replace(/^#/, "")}` : fallback;
       for (const [field, value] of Object.entries(update.values || {})) {
         const col = index[field];
         if (col == null || col < 0 || field === "screenshot") continue;
@@ -346,7 +347,9 @@ async function runBlast() {
     await writeResults(result);
     appendLog({ message: `시트에 ${((result && result.updates) || []).length}행을 기록했습니다.` });
   } catch (err) {
-    appendLog({ message: err && err.message ? err.message : String(err) });
+    const message = err && err.message ? err.message : String(err);
+    const seen = [...document.querySelectorAll("#log li")].some((item) => (item.textContent || "").includes(message));
+    if (!seen) appendLog({ message });
     document.getElementById("status").textContent = "실패";
   } finally {
     button.disabled = false;

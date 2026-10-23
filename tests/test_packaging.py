@@ -4,8 +4,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 def test_wheel_serves_taskpane_outside_the_repo(tmp_path: Path):
+    pytest.importorskip("setuptools", reason="setuptools와 wheel이 없으면 wheel 테스트를 건너뜁니다")
+    pytest.importorskip("wheel", reason="setuptools와 wheel이 없으면 wheel 테스트를 건너뜁니다")
     repo = Path(__file__).resolve().parents[1]
     wheel_dir = tmp_path / "wheels"
     wheel_dir.mkdir()

@@ -18,7 +18,16 @@ from blastid.localblast import (
     run_local,
     source_label,
 )
-from blastid.ncbi import DEFAULT_MAX_WAIT, NCBI, WEB_LINK, NcbiWaitTimeout, blast_reports, check_params, rid_url
+from blastid.ncbi import (
+    DEFAULT_MAX_WAIT,
+    NCBI,
+    WEB_LINK,
+    NcbiWaitTimeout,
+    blast_reports,
+    check_params,
+    format_wait,
+    rid_url,
+)
 from blastid.policy import DISCLAIMER_KO, UsageLog, plan_submission, remote_batch_budget, sleep_until
 from blastid.policy import ET as ET_ZONE
 from blastid.scoring import assess, fungi_lineage, parse_xml_report, web_values
@@ -113,7 +122,9 @@ def run_blast(
             f"NCBI: --backend remote 로 24시간 한도({remote_limit})를 넘겨 제출합니다. "
             "NCBI가 느리게 하거나 막을 수 있습니다. IP는 바꾸지 않습니다."
         )
-    if remote_n < len(chunks):
+    if mode == "local":
+        log(f"로컬 BLAST+ ({local_db})로 검색합니다.")
+    elif remote_n < len(chunks):
         log(
             f"최근 24시간 원격 검색 {usage.count()}건. 한도 {remote_limit}건이라 "
             f"앞 {remote_n}묶음만 NCBI 웹으로 보내고, 나머지는 로컬 BLAST+ ({local_db}) 입니다."
@@ -142,8 +153,6 @@ def run_blast(
     except NcbiWaitTimeout as exc:
         ready = exc.ready
         timed_out = list(exc.rids)
-        for rid in timed_out:
-            log(str(exc) if rid == timed_out[0] else f"RID {rid} 대기 초과 {WEB_LINK.format(rid=rid)}")
     results = {}
     for rid, ch in chunk_of.items():
         if rid not in ready:
@@ -185,21 +194,21 @@ def run_blast(
         late = [q for rid in timed_out for q in chunk_of.get(rid, [])]
         links = " ".join(f"{rid} {WEB_LINK.format(rid=rid)}" for rid in timed_out)
         reuse_flag = f"--reuse-rids {','.join(timed_out)}"
+        notice = (
+            f"NCBI가 {format_wait(max_wait)} 안에 READY가 되지 않았습니다. {links} "
+            f"나중에 {reuse_flag}"
+        )
         if mode == "auto" and late:
-            log(f"대기가 길어 이 {len(late)}개 서열은 로컬 BLAST+ ({local_db})로 넘깁니다.")
             try:
                 results.update(run_local(late, local_db, Path(outdir), log, blastn=blastn))
             except LocalBlastUnavailable as exc:
                 raise LocalBlastUnavailable(
-                    f"{exc} NCBI는 아직 WAITING 입니다. {links} 나중에 {reuse_flag}",
+                    f"{exc} {notice}",
                     {**results, **(exc.partial or {})},
                 ) from exc
+            log(f"{notice} 이 {len(late)}개 서열은 로컬 BLAST+ ({local_db})로 넘겼습니다.")
         elif late:
-            raise LocalBlastUnavailable(
-                f"NCBI가 {max_wait / 60:.0f}분 안에 READY가 되지 않았습니다. {links} "
-                f"나중에 {reuse_flag}",
-                results,
-            )
+            raise LocalBlastUnavailable(notice, results)
     if remote_n < len(chunks):
         rest = [q for ch in chunks[remote_n:] for q in ch]
         try:
@@ -768,7 +777,7 @@ def run_excel(args, template: Template, outdir: Path, log):
         records, entries = _apply(wb, ws, template, cols, done, res, args, outdir, log, write_inputs=False)
         _finish(ncbi, wb, out, ws.title, template, cols, entries, records, args, outdir, log, t0, len(done))
     if stopped:
-        raise SystemExit(stopped)
+        raise SystemExit(1)
 
 
 def run_fresh(queries, args, template: Template, outdir: Path, log):
@@ -783,7 +792,7 @@ def run_fresh(queries, args, template: Template, outdir: Path, log):
     queries = [q for q in queries if q["key"] in res]
     if not queries:
         if stopped:
-            raise SystemExit(stopped)
+            raise SystemExit(1)
         return
     wb = new_workbook(template)
     sheet_name = args.sheet or template.sheet
@@ -803,7 +812,7 @@ def run_fresh(queries, args, template: Template, outdir: Path, log):
     out = Path(args.output) if args.output else Path(outdir) / "blast_results.xlsx"
     _finish(ncbi, wb, out, ws.title, template, cols, entries, records, args, outdir, log, t0, len(queries) or 1)
     if stopped:
-        raise SystemExit(stopped)
+        raise SystemExit(1)
 
 
 def load_fasta_queries(paths, min_len, log) -> list[dict]:

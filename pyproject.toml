@@ -22,7 +22,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "httpx>=0.27"]
+dev = ["pytest>=7", "httpx>=0.27", "setuptools>=68", "wheel"]
 
 [project.scripts]
 blastid = "blastid.cli:main"

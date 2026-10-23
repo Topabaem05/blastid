@@ -31,7 +31,18 @@ from blastid.template import load_template
 
 RID_RE = re.compile(r"RID\s+(\S+)")
 URL_RE = re.compile(r"https://blast\.ncbi\.nlm\.nih\.gov/\S+")
-FILL = {"strange": "F8CBAD", "ambiguous": "FFF2CC"}
+
+
+def row_fill(template, level: str | None, backend: str | None) -> str | None:
+    """템플릿 색. 로컬 행은 깃발이 없으면 local_fill 을 돌려준다."""
+    style = template.style or {}
+    if level == "strange":
+        return str(style.get("strange_fill") or "F8CBAD")
+    if level == "ambiguous":
+        return str(style.get("ambiguous_fill") or "FFF2CC")
+    if backend == "local":
+        return str(style.get("local_fill") or "D6E3F0")
+    return None
 
 
 def addin_dir() -> Path:
@@ -194,7 +205,7 @@ def identify_rows(rows: list[dict], options: _Opt, log, outdir: Path | None = No
                 "row": query["row"],
                 "backend": result.get("backend") or "remote",
                 "level": level,
-                "fill": FILL.get(level or ""),
+                "fill": row_fill(template, level, result.get("backend")),
                 "values": kept,
                 "formats": {k: formats[k] for k in kept if k in formats},
                 "comment": comment,
@@ -305,7 +316,10 @@ def create_app() -> FastAPI:
                     job.error = stopped
                 else:
                     job.status = "done"
-                    job.log("완료" if not stopped else stopped)
+                    if stopped:
+                        job.error = stopped
+                    else:
+                        job.log("완료")
             except (Exception, SystemExit) as exc:
                 job.status = "error"
                 job.error = str(exc) or exc.__class__.__name__

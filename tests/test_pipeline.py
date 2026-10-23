@@ -349,8 +349,14 @@ def test_waiting_rid_stops_at_max_wait(monkeypatch):
     message = str(caught.value)
     assert caught.value.rids == ["DPFJXTPT014"]
     assert "reuse-rids" in message
+    assert "2분" in message
+    assert "0분" not in message
     assert "Blast.cgi?CMD=Get&RID=DPFJXTPT014" in message
     assert clock["t"] < 1_000_000.0 + 180
+    with pytest.raises(NcbiWaitTimeout) as short:
+        ncbi.wait_all({"DPFJXTPT014": (clock["t"], 0)}, max_wait=30)
+    assert "30초" in str(short.value)
+    assert "0분" not in str(short.value)
 
 
 def test_auto_timeout_uses_local_blast(tmp_path, monkeypatch):
@@ -401,6 +407,7 @@ def test_auto_timeout_uses_local_blast(tmp_path, monkeypatch):
     assert seen["db"] == "ITS_RefSeq_Fungi"
     assert res[0]["backend"] == "local"
     assert any("로컬 BLAST+" in line for line in notes)
+    assert sum("reuse-rids" in line for line in notes) == 1
 
     def missing(*_a, **_k):
         raise LocalBlastUnavailable("blastn 실행 파일이 없습니다. blastid setup-local")
@@ -432,6 +439,45 @@ def test_auto_timeout_uses_local_blast(tmp_path, monkeypatch):
     assert "FAKERID" in str(fallen.value)
     assert "reuse-rids" in str(fallen.value)
     assert "setup-local" in str(fallen.value)
+
+
+def test_timeout_message_is_logged_once(tmp_path):
+    from types import SimpleNamespace
+
+    from blastid.ncbi import NcbiWaitTimeout
+    from blastid.pipeline import blast_queries
+
+    seq = "ACGT" * 20
+    fake = FakeNCBI([("S", seq, [_spec("Pyxine copelandii", "EU670225.1", len(seq), len(seq), len(seq))])])
+
+    def stuck(jobs, max_wait=3600):
+        raise NcbiWaitTimeout(list(jobs), {}, max_wait / 60.0)
+
+    fake.wait_all = stuck
+    notes = []
+    args = SimpleNamespace(
+        batch_size=10,
+        backend="remote",
+        remote_limit=100,
+        off_hours=False,
+        dry_run=False,
+        max_wait=0.5,
+        local_db="ITS_RefSeq_Fungi",
+        blastn=None,
+        reuse_rids=None,
+        email="",
+    )
+    _ncbi, _res, stopped = blast_queries(
+        [dict(key=0, label="S", seq=seq, sample_id="S", row=2, merge=None)],
+        args,
+        tmp_path,
+        notes.append,
+        ncbi=fake,
+    )
+    timeout_lines = [line for line in notes if "reuse-rids" in line or "READY" in line]
+    assert timeout_lines == [stopped]
+    assert "30초" in stopped
+    assert "0분" not in stopped
 
 
 def test_template_roundtrip_values_equal_web_values(tmp_path):
