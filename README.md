@@ -2,7 +2,7 @@
 
 지의류·균류 ITS Sanger 서열을 NCBI BLAST로 동정하고, 웹 BLAST Descriptions 표의 **1위 hit** 을 엑셀에 그대로 옮기는 도구입니다.
 
-엑셀 서열 열, FASTA, `.ab1` 폴더(정방향·역방향 합침 포함)를 한 명령으로 처리합니다. 설정은 웹사이트의 blastn 기본값(core_nt, megablast)과 같고, 숫자를 넣는 방식도 웹 표와 같습니다. 기록한 뒤에는 같은 RID를 XML로 다시 받아 셀마다 대조합니다.
+엑셀·CSV 서열 열, FASTA, `.ab1` 폴더(정방향·역방향 합침 포함)를 한 명령으로 처리합니다. Excel 작업창에서도 같은 서버로 돌릴 수 있습니다. 설정은 웹사이트의 blastn 기본값(core_nt, megablast)과 같고, 숫자를 넣는 방식도 웹 표와 같습니다. 기록한 뒤에는 같은 RID를 XML로 다시 받아 셀마다 대조합니다.
 
 ## 설치
 
@@ -11,7 +11,7 @@ pip install -e ".[dev]"
 blastid --help
 ```
 
-Python 3.10 이상이 필요합니다. 의존성은 Biopython, openpyxl, PyYAML, matplotlib, Pillow 입니다.
+Python 3.10 이상이 필요합니다. 의존성은 Biopython, openpyxl, PyYAML, matplotlib, Pillow, FastAPI, uvicorn 입니다.
 
 NCBI에 연락 이메일을 알리고 싶으면 환경변수만 설정합니다. **메일을 안 넣어도 동작하고, 코드에 메일이 박혀 있지 않습니다.** `NCBI_EMAIL` / `NCBI_API_KEY` 가 있을 때만 요청에 실립니다. API 키는 Taxonomy(E-utilities) 조회에만 쓰입니다.
 
@@ -31,8 +31,9 @@ blastid run 시료.xlsx -o 결과.xlsx
 # 크로마토그램 폴더: Mott 트리밍 → 정·역 합침 → BLAST → 템플릿 엑셀
 blastid run ./ab1폴더 -o 결과.xlsx
 
-# FASTA
+# FASTA·CSV (utf-8, BOM, cp949)
 blastid run seqs.fasta -o 결과.xlsx
+blastid run 시료.csv -o 결과.xlsx
 
 # 대상만 확인 (제출하지 않음)
 blastid run 시료.xlsx --rows 2-10 --only-empty --dry-run
@@ -186,6 +187,58 @@ blastid verify 결과.xlsx --log blast_runs/<날짜_시간>/log.json
 - `run.log`
 - ab1 인 경우 `merged.fasta`, `merged.fastq`, `ab1_qc.csv`, `merge_qc.csv`
 
+## CSV
+
+`.csv` 도 엑셀과 같이 첫 줄을 머리글로 읽습니다. 인코딩은 UTF-8(BOM 포함)을 먼저 시도하고, 아니면 CP949입니다. 구분자 `,` `;` 탭을 구분합니다. 서식과 그림은 CSV에 담을 수 없어서 결과는 `.xlsx` 로 저장합니다.
+
+```bash
+blastid run 시료.csv --id-header ID --seq-header Seq -o 결과.xlsx
+```
+
+## Excel 작업창
+
+브라우저에서 NCBI를 직접 치면 CORS와 호출 제한에 걸리므로, 작업창은 이 컴퓨터의 `blastid serve` 로만 말합니다. 서버가 BLAST를 하고 결과를 머리글 이름으로 돌려주면, 작업창이 시트에 쓰고 `[이상]`/`[애매]` 색과 첫 행 고정을 적용합니다.
+
+```bash
+blastid serve
+# https://localhost:8787/taskpane.html
+# 매니페스트: addin/manifest.xml  (주소는 https://localhost:8787)
+```
+
+처음 실행하면 `~/.blastid/dev-certs/localhost.crt` 를 만듭니다. 이미 `npx office-addin-dev-certs install` 로 만들어 둔 인증서가 있으면 그것을 씁니다. Excel이 인증서를 신뢰해야 작업창이 열립니다. 브라우저에서 `https://localhost:8787/taskpane.html` 을 한 번 열어 경고를 확인한 뒤, 인증서를 신뢰할 루트에 넣으세요.
+
+작업창에서 고를 수 있는 것:
+
+- 현재 시트 또는 선택한 행, 행 범위(`2-10,15`), 굵은 ID만, Scientific Name 이 빈 행만
+- ID·서열 머리글, 기본 템플릿 또는 YAML 파일, 최소 Ident 90 / Cover 80 / 다른 속 차이 2, 묶음 크기
+- 이메일(기본 빈 칸, 비어 있으면 요청에 넣지 않음), 50건을 넘길 때 한가한 시간까지 기다리기
+
+설정은 Office 로밍 설정에 저장하고, 그게 없으면 브라우저 `localStorage` 에 남깁니다. 진행 목록에는 RID와 NCBI 결과 페이지 링크가 나옵니다.
+
+사이드로드:
+
+- **Windows Excel**: 삽입 → 추가 기능 → 내 추가 기능 → 내 추가 기능 업로드 → `addin/manifest.xml`. 홈 탭에 **BLAST 동정** 단추가 생깁니다.
+- **Mac Excel**: 같은 업로드 메뉴가 있으면 그것을 씁니다. 없으면 `manifest.xml` 을 `~/Library/Containers/com.microsoft.Excel/Data/Documents/wef/` 에 넣고 Excel을 다시 엽니다.
+- **웹 Excel** (excel.office.com): 삽입 → 추가 기능 → 추가 기능 업로드 → `manifest.xml`. 이 컴퓨터의 브라우저가 `https://localhost:8787` 을 열 수 있어야 합니다. 서버는 `127.0.0.1` 만 받습니다.
+
+`yo office` 로 만드는 작업창과 같은 Office.js 매니페스트(XML, 홈 탭 단추, 작업창)입니다. 페이지는 webpack 개발 서버 대신 `blastid serve` 가 직접 제공합니다.
+
+작업창 경로의 독립 XML 재검증은 하지 않습니다. 셀을 다시 읽어 RID XML과 맞추는 검증은 `blastid run` / `blastid verify` 가 합니다.
+
+## NCBI 사용 지침
+
+[BLAST 개발자 안내](https://blast.ncbi.nlm.nih.gov/doc/blast-help/developerinfo.html)와 [NCBI 정책](https://www.ncbi.nlm.nih.gov/home/about/policies/)을 따릅니다.
+
+- 모든 BLAST·E-utilities 요청에 `tool=blastid` 를 붙입니다. `email` 은 `NCBI_EMAIL` 또는 작업창에 입력한 주소가 있을 때만 붙입니다.
+- 제출 간격은 10초 이상, 같은 RID 확인은 1분에 한 번 이하, E-utilities는 초당 3회 이하입니다.
+- 검색 1건은 RID 제출 1회입니다. 한 번에 50건을 넘기면 경고합니다. `--off-hours` 또는 작업창의 같은 옵션이 켜져 있고 지금이 한가한 시간이 아니면, 주말 또는 평일 미국 동부 21:00–05:00(서머타임 반영)까지 기다립니다. 안내 문장에는 그 창의 한국 시간도 나옵니다.
+- 최근 24시간 검색 수는 `~/.blastid/ncbi_usage.json` 에 남습니다. 이번에 더하면 80건 이상이면 100건에 가깝다고 경고하고, 100건을 넘으면 NCBI가 느리게 하거나 막을 수 있다고 알립니다.
+- 아래 고지는 작업창과 실제 제출 로그에 표시합니다.
+
+> BLAST는 NCBI의 공개 서비스입니다. 미국 정부는 NCBI가 제공하는 문서와 소프트웨어의 정확성·완전성·유용성을 보증하지 않으며 법적 책임을 지지 않습니다. NCBI는 특정 상업 제품·방법·서비스를 보증하거나 권하지 않습니다. 웹사이트에 실린 저자의 견해가 미국 정부의 입장을 뜻하지는 않으며, 광고나 제품 보증에 쓸 수 없습니다.
+> https://www.ncbi.nlm.nih.gov/home/about/policies/
+> https://blast.ncbi.nlm.nih.gov/doc/blast-help/developerinfo.html
+
 ## 테스트
 
 ```bash
@@ -206,3 +259,6 @@ BLASTID_LIVE_XLSX=/path/to/sample.xlsx pytest -m live
 - 1위 이름은 BLAST가 보여 준 이름입니다. Taxonomy 의 현재 학명과 다르면 로그에만 적습니다.
 - 합침 일치도는 겹침 구간에서 양쪽이 모두 A/C/G/T 인 자리만 셉니다. N 은 분모에 넣지 않습니다.
 - tracy 를 쓰면 basecall 이 크로마토그램 파일에 들어 있는 서열과 달라질 수 있습니다.
+- Excel 작업창은 `https://localhost:8787` 인증서를 신뢰해야 열립니다. 서버를 끄면 작업창도 멈춥니다.
+- 작업창은 시트에 결과를 쓰지만, RID XML로 셀을 다시 대조하는 검증은 명령줄 `blastid run` 이 합니다.
+- 50건을 넘겨 `--off-hours` 로 기다릴 때는 그 프로세스가 켜져 있어야 합니다. 대기는 몇 시간이 될 수 있습니다.

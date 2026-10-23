@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>blastid</title>
+  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+  <link rel="stylesheet" href="taskpane.css">
+</head>
+<body>
+  <header>
+    <h1>blastid</h1>
+    <p>NCBI BLAST로 ITS 서열을 동정합니다. 이 창은 이 컴퓨터의 blastid 서버로만 요청을 보냅니다.</p>
+  </header>
+
+  <section>
+    <h2>실행</h2>
+    <label class="choice"><input type="radio" name="scope" value="sheet" checked> 현재 시트</label>
+    <label class="choice"><input type="radio" name="scope" value="selection"> 선택한 행</label>
+    <label>행 범위 <input id="row-range" type="text" placeholder="예: 2-10, 15" autocomplete="off"></label>
+    <label class="choice"><input id="bold-only" type="checkbox"> ID가 굵은 행만</label>
+    <label class="choice"><input id="only-empty" type="checkbox"> Scientific Name 이 빈 행만</label>
+    <button id="run" type="button">BLAST 실행</button>
+    <button id="save-settings" type="button" class="secondary">설정 저장</button>
+  </section>
+
+  <section>
+    <h2>설정</h2>
+    <label>ID 머리글 <input id="id-header" type="text" value="ID(Voucher)"></label>
+    <label>서열 머리글 <input id="seq-header" type="text" value="Seq"></label>
+    <label>출력 템플릿
+      <select id="template-mode">
+        <option value="builtin">기본 템플릿</option>
+        <option value="yaml">YAML 파일</option>
+      </select>
+    </label>
+    <label id="yaml-label">YAML
+      <input id="template-file" type="file" accept=".yaml,.yml,text/yaml">
+    </label>
+    <label>최소 Per. Ident (%) <input id="min-ident" type="number" min="0" max="100" step="0.1" value="90"></label>
+    <label>최소 Query Cover (%) <input id="min-cover" type="number" min="0" max="100" step="0.1" value="80"></label>
+    <label>다른 속 허용 차이 (%p) <input id="alt-margin" type="number" min="0" max="100" step="0.1" value="2"></label>
+    <label>묶음 크기 (한 RID) <input id="batch-size" type="number" min="1" max="100" step="1" value="10"></label>
+    <label>NCBI 이메일 (비워 두면 보내지 않음)
+      <input id="email" type="email" placeholder="선택" autocomplete="off">
+    </label>
+    <label class="choice"><input id="off-hours" type="checkbox"> 검색이 50건을 넘으면 한가한 시간까지 기다리기</label>
+    <p id="window" class="hint"></p>
+  </section>
+
+  <section>
+    <h2>진행</h2>
+    <ol id="log"></ol>
+    <p id="status" class="hint">대기 중</p>
+  </section>
+
+  <section class="notice">
+    <h2>NCBI 고지</h2>
+    <p id="disclaimer-ko"></p>
+    <p id="disclaimer-en"></p>
+  </section>
+
+  <script src="taskpane.js"></script>
+</body>
+</html>

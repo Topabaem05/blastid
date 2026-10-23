@@ -29,6 +29,11 @@ def _blast_args(sp):
         help="새로 제출하지 않고 기존 RID를 묶음 순서대로 사용 (쉼표 구분, 약 36시간 이내)",
     )
     sp.add_argument("--dry-run", action="store_true", help="대상만 보여주고 NCBI에 제출하지 않음")
+    sp.add_argument(
+        "--off-hours",
+        action="store_true",
+        help="RID가 50건을 넘고 지금이 한가한 시간이 아니면 미국 동부 주말·평일 21:00–05:00까지 기다림",
+    )
     sp.add_argument("--min-seq-len", type=int, default=50, help="BLAST에 넣을 최소 서열 길이 (기본 50)")
 
 
@@ -80,7 +85,9 @@ def build_parser() -> argparse.ArgumentParser:
   blastid run 시료.xlsx -o 결과.xlsx
   blastid run ./ab1폴더 -o 결과.xlsx
   blastid run seqs.fasta
+  blastid run 시료.csv -o 결과.xlsx
   blastid run 시료.xlsx --rows 2-10 --only-empty --dry-run
+  blastid serve                                          # Excel 작업창용 로컬 HTTPS
   blastid ab1 ./ab1폴더 --pairs pairs.csv          # 합치기만
   blastid init-template -o ./내템플릿
   blastid verify 결과.xlsx --log blast_runs/.../log.json
@@ -121,6 +128,10 @@ NCBI_EMAIL, NCBI_API_KEY 는 환경변수가 있을 때만 전송합니다. 없�
 
     init = sub.add_parser("init-template", help="기본 YAML·xlsx 템플릿을 만들어 줌")
     init.add_argument("-o", "--output", default="blastid_template", help="만들 폴더 (기본 ./blastid_template)")
+
+    serve = sub.add_parser("serve", help="Excel 작업창용 로컬 HTTPS 서버 (127.0.0.1)")
+    serve.add_argument("--port", type=int, default=8787)
+    serve.add_argument("--host", default="127.0.0.1")
     return p
 
 
@@ -135,7 +146,7 @@ def main(argv=None) -> None:
         argv = sys.argv[1:]
     else:
         argv = list(argv)
-    known = {"run", "excel", "ab1", "fasta", "verify", "init-template"}
+    known = {"run", "excel", "ab1", "fasta", "verify", "init-template", "serve"}
     if argv and argv[0] not in known and not argv[0].startswith("-"):
         argv = ["run", *argv]
     parser = build_parser()
@@ -145,6 +156,11 @@ def main(argv=None) -> None:
     args = parser.parse_args(argv)
     if args.cmd is None:
         parser.print_help()
+        return
+    if args.cmd == "serve":
+        from blastid.server import serve as serve_app
+
+        serve_app(host=args.host, port=args.port)
         return
     if args.cmd == "init-template":
         from pathlib import Path

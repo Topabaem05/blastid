@@ -1,0 +1,66 @@
+:root {
+  color-scheme: light;
+  font-family: "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+  font-size: 13px;
+  line-height: 1.4;
+}
+body {
+  margin: 0;
+  padding: 12px 14px 28px;
+  background: #f7f9fb;
+  color: #1b2838;
+}
+header h1 {
+  margin: 0 0 4px;
+  font-size: 18px;
+  color: #1f4e78;
+}
+header p, .hint, .notice p {
+  margin: 0;
+  color: #405060;
+}
+section {
+  margin-top: 14px;
+  padding: 10px 12px;
+  background: #fff;
+  border: 1px solid #d5dee8;
+  border-radius: 8px;
+}
+h2 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+label {
+  display: block;
+  margin: 6px 0;
+}
+input[type="text"], input[type="number"], input[type="email"], select {
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 2px;
+  padding: 4px 6px;
+}
+.choice { display: flex; gap: 6px; align-items: center; }
+.choice input { width: auto; }
+button {
+  margin-top: 8px;
+  margin-right: 6px;
+  padding: 6px 10px;
+  background: #1f4e78;
+  color: #fff;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+button.secondary { background: #5b7086; }
+button:disabled { opacity: 0.6; cursor: default; }
+#log {
+  margin: 0;
+  padding-left: 18px;
+  max-height: 220px;
+  overflow: auto;
+}
+#log a { color: #0563c1; }
+.notice { background: #f4f7fb; }
+.notice p { margin-top: 6px; font-size: 12px; }
+#yaml-label[hidden] { display: none; }

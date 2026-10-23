@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
+import io
 import json
+import math
 import re
 import time
 from pathlib import Path
@@ -11,6 +13,8 @@ from pathlib import Path
 from blastid.assemble import assemble_files, write_qc
 from blastid.fields import build_field_values
 from blastid.ncbi import NCBI, WEB_LINK, blast_reports, check_params, rid_url
+from blastid.policy import DISCLAIMER_KO, UsageLog, plan_submission, sleep_until
+from blastid.policy import ET as ET_ZONE
 from blastid.scoring import assess, fungi_lineage, parse_xml_report, web_values
 from blastid.template import Template, load_template
 from blastid.workbook import (
@@ -75,7 +79,7 @@ def unique_labels(queries: list[dict]) -> None:
             q["label"] = f"{base}__{n}"
 
 
-def run_blast(ncbi, queries, batch_size, outdir, log, reuse=None) -> dict:
+def run_blast(ncbi, queries, batch_size, outdir, log, reuse=None, usage: UsageLog | None = None) -> dict:
     raw = Path(outdir) / "raw"
     raw.mkdir(parents=True, exist_ok=True)
     chunks = [queries[i : i + batch_size] for i in range(0, len(queries), batch_size)]
@@ -90,6 +94,11 @@ def run_blast(ncbi, queries, batch_size, outdir, log, reuse=None) -> dict:
             ncbi._last_poll.pop(rid, None)
         else:
             rid, rtoe = ncbi.submit(fasta)
+            if usage is not None:
+                try:
+                    usage.add(rid=rid)
+                except OSError as e:
+                    log(f"  검색 횟수 기록 실패({e})")
         jobs[rid] = (time.time(), rtoe)
         chunk_of[rid] = ch
         log(f"제출: RID {rid} ({len(ch)}개 서열, 예상 {rtoe}초) {WEB_LINK.format(rid=rid)}")
@@ -504,19 +513,41 @@ def _finish(ncbi, wb, out, sheet_name, template, cols, entries, records, args, o
     log(f"로그: {outdir / 'log.csv'}, {outdir / 'log.json'}")
 
 
+def _job_email(args):
+    """None 이면 환경변수. 문자열(빈 문자열 포함)이면 그 값만 사용."""
+    if "email" in getattr(args, "__dict__", {}):
+        return args.email
+    return None
+
+
 def blast_queries(queries, args, outdir, log, ncbi=None):
     if not queries:
         log("BLAST할 서열이 없습니다.")
         return None, None
+    reuse = _reuse(args)
+    batch = max(1, int(getattr(args, "batch_size", 10) or 10))
+    n_searches = 0 if reuse else math.ceil(len(queries) / batch)
+    usage = UsageLog()
+    plan = plan_submission(
+        n_searches,
+        bool(getattr(args, "off_hours", False)),
+        dt.datetime.now(ET_ZONE),
+        usage,
+    )
+    for warning in plan.warnings:
+        log("NCBI: " + warning)
     if getattr(args, "dry_run", False):
         for q in queries:
             log(f"[dry-run] {q['sample_id']}  {len(q['seq'])} bp")
         log("dry-run: NCBI에 제출하지 않았습니다.")
         return None, None
-    ncbi = ncbi or NCBI(log)
+    if plan.wait_until is not None:
+        sleep_until(plan.wait_until, log)
+    ncbi = ncbi or NCBI(log, email=_job_email(args))
     if not ncbi.email:
-        log("NCBI_EMAIL 이 없습니다. 이메일 없이 제출합니다 (NCBI는 연락처 설정을 권장합니다).")
-    res = run_blast(ncbi, queries, args.batch_size, outdir, log, _reuse(args))
+        log("이메일을 보내지 않습니다. NCBI_EMAIL 또는 작업창의 이메일이 비어 있습니다.")
+    log(DISCLAIMER_KO)
+    res = run_blast(ncbi, queries, batch, outdir, log, reuse, usage=usage)
     check_params(res, log)
     add_taxonomy(ncbi, res, log)
     return ncbi, res
@@ -529,9 +560,15 @@ def run_excel(args, template: Template, outdir: Path, log):
     out = Path(args.output).resolve() if args.output else None
     if out is None:
         out = src if getattr(args, "in_place", False) else Path(outdir) / f"{src.stem}_blast.xlsx"
-    if out == src and not getattr(args, "in_place", False):
+    if out == src and not getattr(args, "in_place", False) and src.suffix.lower() != ".csv":
         raise SystemExit("출력이 입력 파일과 같습니다. 덮어쓰려면 --in-place 를 쓰세요.")
-    wb = openpyxl.load_workbook(src)
+    if src.suffix.lower() == ".csv":
+        wb = workbook_from_csv(src)
+        if out is None or out == src:
+            out = Path(outdir) / f"{src.stem}_blast.xlsx"
+            log(f"CSV는 서식·그림을 담을 수 없어 xlsx로 저장합니다: {out}")
+    else:
+        wb = openpyxl.load_workbook(src)
     sheet_name = args.sheet or template.sheet
     ws = pick_sheet(wb, sheet_name, log)
     cols = _bind_columns(ws, template, args, log)
@@ -657,7 +694,7 @@ def detect_kind(paths: list[str]) -> str:
             kinds.append("ab1")
         elif suf in {".fasta", ".fa", ".fna", ".ffn", ".fas"}:
             kinds.append("fasta")
-        elif suf in {".xlsx", ".xlsm"}:
+        elif suf in {".xlsx", ".xlsm", ".csv"}:
             kinds.append("excel")
         elif not path.exists():
             raise SystemExit(f"입력이 없습니다: {path}")
@@ -676,8 +713,37 @@ def detect_kind(paths: list[str]) -> str:
     if len(set(kinds)) != 1:
         raise SystemExit("엑셀, FASTA, ab1 을 한 번에 섞지 마세요.")
     if kinds[0] == "excel" and len(paths) != 1:
-        raise SystemExit("엑셀은 파일을 하나만 지정하세요.")
+        raise SystemExit("엑셀·CSV는 파일을 하나만 지정하세요.")
     return kinds[0]
+
+
+def read_text_auto(path: Path) -> str:
+    """UTF-8(BOM 허용)을 먼저 보고, 아니면 CP949로 읽는다."""
+    raw = Path(path).read_bytes()
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return raw.decode("cp949")
+
+
+def workbook_from_csv(path: Path):
+    """CSV를 첫 시트가 표인 워크북으로 만든다. 구분자 , ; 탭을 가늠한다."""
+    import openpyxl
+
+    text = read_text_auto(path)
+    sample = text[:8192]
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",\t;")
+    except csv.Error:
+        dialect = csv.excel
+    rows = list(csv.reader(io.StringIO(text), dialect))
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    for r, row in enumerate(rows, start=1):
+        for c, value in enumerate(row, start=1):
+            ws.cell(r, c, value if value != "" else None)
+    return wb
 
 
 def execute(args) -> None:

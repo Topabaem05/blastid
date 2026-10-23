@@ -1,13 +1,17 @@
 """NCBI BLAST URL API와 Taxonomy E-utilities.
 
-이메일과 API 키는 환경변수 ``NCBI_EMAIL``, ``NCBI_API_KEY`` 가
-비어 있지 않을 때만 요청에 넣는다. 없어도 동작한다.
+``tool=blastid`` 는 BLAST와 E-utilities에 항상 붙인다.
+이메일과 API 키는 환경변수 ``NCBI_EMAIL``, ``NCBI_API_KEY``
+(또는 이 실행에서 넘겨 준 이메일)이 있을 때만 보낸다.
+제출 간격은 10초 이상, 같은 RID 상태 확인은 1분에 한 번 이하,
+E-utilities는 초당 3회 이하다.
 """
 from __future__ import annotations
 
 import json
 import os
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -37,7 +41,10 @@ WEB_PARAMS = [
 SUBMIT_GAP = 10.0
 FIRST_POLL = 20.0
 POLL_GAP = 60.0
+EUTILS_MIN_INTERVAL = 1.0 / 3.0
 RETRY_HTTP = {429, 500, 502, 503, 504}
+_eutils_lock = threading.Lock()
+_eutils_next = 0.0
 
 
 def ncbi_email() -> str:
@@ -48,21 +55,37 @@ def ncbi_api_key() -> str:
     return os.environ.get("NCBI_API_KEY", "").strip()
 
 
-def blast_identity_params() -> list[tuple[str, str]]:
-    """BLAST URL에 붙이는 tool/email. api_key 는 E-utilities 전용."""
+def blast_identity_params(email: str | None = None) -> list[tuple[str, str]]:
+    """BLAST URL에 붙이는 tool/email.
+
+    ``email is None`` 이면 환경변수를 본다. 빈 문자열이면 이메일을 붙이지 않는다.
+    api_key 는 E-utilities 전용이라 BLAST URL에는 넣지 않는다.
+    """
     params = [("tool", TOOL_NAME)]
-    email = ncbi_email()
-    if email:
-        params.append(("email", email))
+    addr = ncbi_email() if email is None else email.strip()
+    if addr:
+        params.append(("email", addr))
     return params
 
 
+def pace_eutils() -> None:
+    """E-utilities 호출을 초당 3회 이하로 맞춘다."""
+    global _eutils_next
+    with _eutils_lock:
+        now = time.time()
+        if now < _eutils_next:
+            time.sleep(_eutils_next - now)
+            now = time.time()
+        _eutils_next = now + EUTILS_MIN_INTERVAL
+
+
 class NCBI:
-    def __init__(self, log=print):
+    def __init__(self, log=print, *, email: str | None = None):
         self.log = log
         self._last_put = 0.0
         self._last_poll: dict[str, float] = {}
-        self.email = ncbi_email()
+        # None 이면 환경변수. 빈 문자열이면 이 실행에서는 메일을 보내지 않는다.
+        self.email = ncbi_email() if email is None else email.strip()
         self.api_key = ncbi_api_key()
         try:
             from Bio import Entrez
@@ -79,7 +102,7 @@ class NCBI:
             warnings.filterwarnings("ignore", category=UserWarning, module=r"Bio\.Entrez")
 
     def _req(self, params, post=False, timeout=180, tries=4) -> str:
-        params = list(params) + blast_identity_params()
+        params = list(params) + blast_identity_params(self.email)
         data = urllib.parse.urlencode(params)
         headers = {"User-Agent": f"{TOOL_NAME}/{__version__}"}
         for k in range(tries):
@@ -186,6 +209,7 @@ class NCBI:
             recs = None
             for k in range(4):
                 try:
+                    pace_eutils()
                     h = self.Entrez.efetch(db="taxonomy", id=",".join(chunk), retmode="xml")
                     recs = self.Entrez.read(h)
                     h.close()

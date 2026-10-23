@@ -87,7 +87,7 @@ def test_excel_maps_by_header_not_column_letter(tmp_path, monkeypatch):
         ("Low_2", seq_low, [_spec("Lecidella biformis", "PZ322662.1", 80, 100, 100, bit=300.9, evalue=1.23e-50)]),
     ]
     fake = FakeNCBI(queries)
-    monkeypatch.setattr("blastid.pipeline.NCBI", lambda log=None: fake)
+    monkeypatch.setattr("blastid.pipeline.NCBI", lambda log=None, **_k: fake)
 
     # 열 순서를 일부러 섞는다. K열이 Scientific Name 이 아니어야 한다.
     wb = openpyxl.Workbook()
@@ -160,7 +160,7 @@ def test_excel_maps_by_header_not_column_letter(tmp_path, monkeypatch):
 def test_fresh_workbook_from_fasta(tmp_path, monkeypatch):
     seq = "ACGT" * 40
     queries = [("SampleA", seq, [_spec("Pyxine copelandii", "EU670225.1", len(seq), len(seq), len(seq))])]
-    monkeypatch.setattr("blastid.pipeline.NCBI", lambda log=None: FakeNCBI(queries))
+    monkeypatch.setattr("blastid.pipeline.NCBI", lambda log=None, **_k: FakeNCBI(queries))
     fasta = tmp_path / "s.fasta"
     fasta.write_text(f">SampleA\n{seq}\n", encoding="utf-8")
     out = tmp_path / "res.xlsx"
@@ -204,7 +204,7 @@ def test_bold_only(tmp_path, monkeypatch):
             captured["fasta"] = fasta
             return super().submit(fasta)
 
-    monkeypatch.setattr("blastid.pipeline.NCBI", lambda log=None: One())
+    monkeypatch.setattr("blastid.pipeline.NCBI", lambda log=None, **_k: One())
     wb = openpyxl.Workbook()
     ws = wb.active
     ws["A1"] = "ID(Voucher)"

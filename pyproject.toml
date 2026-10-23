@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blastid"
-version = "1.0.0"
+version = "1.1.0"
 description = "NCBI BLAST ITS identification for lichen and fungal Sanger reads"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -17,10 +17,12 @@ dependencies = [
   "PyYAML>=6",
   "matplotlib>=3.7",
   "Pillow>=10",
+  "fastapi>=0.110",
+  "uvicorn>=0.27",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7"]
+dev = ["pytest>=7", "httpx>=0.27"]
 
 [project.scripts]
 blastid = "blastid.cli:main"
