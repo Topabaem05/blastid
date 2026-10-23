@@ -35,6 +35,13 @@ def _blast_args(sp):
         help="RID가 50건을 넘고 지금이 한가한 시간이 아니면 미국 동부 주말·평일 21:00–05:00까지 기다림",
     )
     sp.add_argument("--min-seq-len", type=int, default=50, help="BLAST에 넣을 최소 서열 길이 (기본 50)")
+    sp.add_argument("--backend", choices=["auto", "remote", "local"], default="auto",
+                    help="auto: 24시간 원격 한도를 넘기면 나머지를 로컬 BLAST+로 (기본)")
+    sp.add_argument("--remote-limit", type=int, default=100, help="24시간 원격 RID 상한 (기본 100)")
+    sp.add_argument("--local-db", default="ITS_RefSeq_Fungi",
+                    help="로컬 DB 이름 또는 makeblastdb 접두 경로 (기본 ITS_RefSeq_Fungi)")
+    sp.add_argument("--blastn", help="blastn 실행 파일 경로 (없으면 PATH 또는 setup-local 설치)")
+    sp.add_argument("--max-wait", type=float, default=60, help="RID가 READY 될 때까지 기다릴 최대 시간(분, 기본 60)")
 
 
 def _excel_args(sp):
@@ -132,6 +139,12 @@ NCBI_EMAIL, NCBI_API_KEY 는 환경변수가 있을 때만 전송합니다. 없�
     serve = sub.add_parser("serve", help="Excel 작업창용 로컬 HTTPS 서버 (127.0.0.1)")
     serve.add_argument("--port", type=int, default=8787)
     serve.add_argument("--host", default="127.0.0.1")
+
+    setup = sub.add_parser("setup-local", help="공식 NCBI BLAST+와 로컬 DB(기본 ITS_RefSeq_Fungi, taxdb) 설치")
+    setup.add_argument("--db", default="ITS_RefSeq_Fungi", help="NCBI BLAST DB 이름. 예: ITS_eukaryote_sequences")
+    setup.add_argument("--fasta", help="NCBI DB 대신 이 FASTA로 makeblastdb")
+    setup.add_argument("--name", help="--fasta 로 만들 DB 이름")
+    setup.add_argument("--no-taxdb", action="store_true", help="taxdb를 같이 받지 않음")
     return p
 
 
@@ -146,7 +159,7 @@ def main(argv=None) -> None:
         argv = sys.argv[1:]
     else:
         argv = list(argv)
-    known = {"run", "excel", "ab1", "fasta", "verify", "init-template", "serve"}
+    known = {"run", "excel", "ab1", "fasta", "verify", "init-template", "serve", "setup-local"}
     if argv and argv[0] not in known and not argv[0].startswith("-"):
         argv = ["run", *argv]
     parser = build_parser()
@@ -156,6 +169,11 @@ def main(argv=None) -> None:
     args = parser.parse_args(argv)
     if args.cmd is None:
         parser.print_help()
+        return
+    if args.cmd == "setup-local":
+        from blastid.localblast import setup_local
+
+        setup_local(db=args.db, fasta=args.fasta, name=args.name, taxdb=not args.no_taxdb)
         return
     if args.cmd == "serve":
         from blastid.server import serve as serve_app
@@ -212,6 +230,8 @@ def _cmd_verify(args) -> None:
             seq_len=r.get("seq_len") or r.get("qlen"),
             taxid=r.get("taxid"),
             name_json=r.get("name"),
+            backend=r.get("search_backend") or r.get("backend") or "",
+            local_db=r.get("local_db") or "",
         )
         for r in recs
     ]

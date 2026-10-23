@@ -12,8 +12,14 @@ from pathlib import Path
 
 from blastid.assemble import assemble_files, write_qc
 from blastid.fields import build_field_values
-from blastid.ncbi import NCBI, WEB_LINK, blast_reports, check_params, rid_url
-from blastid.policy import DISCLAIMER_KO, UsageLog, plan_submission, sleep_until
+from blastid.localblast import (
+    LocalBlastUnavailable,
+    local_note,
+    run_local,
+    source_label,
+)
+from blastid.ncbi import DEFAULT_MAX_WAIT, NCBI, WEB_LINK, NcbiWaitTimeout, blast_reports, check_params, rid_url
+from blastid.policy import DISCLAIMER_KO, UsageLog, plan_submission, remote_batch_budget, sleep_until
 from blastid.policy import ET as ET_ZONE
 from blastid.scoring import assess, fungi_lineage, parse_xml_report, web_values
 from blastid.template import Template, load_template
@@ -40,7 +46,7 @@ LOG_FIELDS = [
     "query_cover", "evalue", "per_ident", "acc_len", "accession", "taxid", "lineage",
     "flag", "comment", "verified", "elapsed_s", "merge_mode", "merge_backend",
     "direction", "overlap_len", "overlap_ident", "n_conflicts", "n_ambiguities",
-    "trimmed_len",
+    "trimmed_len", "source", "search_backend",
 ]
 
 
@@ -79,19 +85,47 @@ def unique_labels(queries: list[dict]) -> None:
             q["label"] = f"{base}__{n}"
 
 
-def run_blast(ncbi, queries, batch_size, outdir, log, reuse=None, usage: UsageLog | None = None) -> dict:
+def run_blast(
+    ncbi,
+    queries,
+    batch_size,
+    outdir,
+    log,
+    reuse=None,
+    usage: UsageLog | None = None,
+    *,
+    backend: str = "auto",
+    remote_limit: int = 100,
+    local_db: str = "ITS_RefSeq_Fungi",
+    blastn: str | None = None,
+    max_wait: float = DEFAULT_MAX_WAIT,
+) -> dict:
     raw = Path(outdir) / "raw"
     raw.mkdir(parents=True, exist_ok=True)
     chunks = [queries[i : i + batch_size] for i in range(0, len(queries), batch_size)]
     if reuse and len(reuse) != len(chunks):
         raise SystemExit(f"--reuse-rids 개수({len(reuse)})가 제출 묶음 수({len(chunks)})와 다릅니다.")
+    usage = usage or UsageLog()
+    mode = "remote" if reuse else (backend or "auto")
+    remote_n = remote_batch_budget(usage.count(), len(chunks), remote_limit, mode)
+    if mode == "remote" and not reuse and usage.count() + len(chunks) > remote_limit:
+        log(
+            f"NCBI: --backend remote 로 24시간 한도({remote_limit})를 넘겨 제출합니다. "
+            "NCBI가 느리게 하거나 막을 수 있습니다. IP는 바꾸지 않습니다."
+        )
+    if remote_n < len(chunks):
+        log(
+            f"최근 24시간 원격 검색 {usage.count()}건. 한도 {remote_limit}건이라 "
+            f"앞 {remote_n}묶음만 NCBI 웹으로 보내고, 나머지는 로컬 BLAST+ ({local_db}) 입니다."
+        )
     jobs = {}
     chunk_of = {}
-    for ci, ch in enumerate(chunks):
+    for ci, ch in enumerate(chunks[:remote_n]):
         fasta = "".join(f">{q['label']}\n{q['seq']}\n" for q in ch)
         if reuse:
             rid, rtoe = reuse[ci], 0
             ncbi._last_poll.pop(rid, None)
+            log(f"기존 RID 재사용: {rid} ({len(ch)}개 서열) {WEB_LINK.format(rid=rid)}")
         else:
             rid, rtoe = ncbi.submit(fasta)
             if usage is not None:
@@ -99,12 +133,21 @@ def run_blast(ncbi, queries, batch_size, outdir, log, reuse=None, usage: UsageLo
                     usage.add(rid=rid)
                 except OSError as e:
                     log(f"  검색 횟수 기록 실패({e})")
+            log(f"제출: RID {rid} ({len(ch)}개 서열, 예상 {rtoe}초) {WEB_LINK.format(rid=rid)}")
         jobs[rid] = (time.time(), rtoe)
         chunk_of[rid] = ch
-        log(f"제출: RID {rid} ({len(ch)}개 서열, 예상 {rtoe}초) {WEB_LINK.format(rid=rid)}")
-    ready = ncbi.wait_all(jobs)
+    timed_out: list[str] = []
+    try:
+        ready = ncbi.wait_all(jobs, max_wait=max_wait) if jobs else {}
+    except NcbiWaitTimeout as exc:
+        ready = exc.ready
+        timed_out = list(exc.rids)
+        for rid in timed_out:
+            log(str(exc) if rid == timed_out[0] else f"RID {rid} 대기 초과 {WEB_LINK.format(rid=rid)}")
     results = {}
     for rid, ch in chunk_of.items():
+        if rid not in ready:
+            continue
         payload = ncbi.get_json(rid)
         (raw / f"{rid}.json").write_text(json.dumps(payload), encoding="utf-8")
         reps = blast_reports(payload)
@@ -131,11 +174,43 @@ def run_blast(ncbi, queries, batch_size, outdir, log, reuse=None, usage: UsageLo
                 qlen=qlen,
                 seq_len=len(q["seq"]),
                 db=target.get("db"),
+                backend="remote",
+                source=source_label(target.get("db") or "core_nt", local=False, rid=rid),
                 params=report.get("params"),
                 blast_version=report.get("version"),
                 hits=hits,
                 elapsed=ready[rid] - jobs[rid][0],
             )
+    if timed_out:
+        late = [q for rid in timed_out for q in chunk_of.get(rid, [])]
+        links = " ".join(f"{rid} {WEB_LINK.format(rid=rid)}" for rid in timed_out)
+        reuse_flag = f"--reuse-rids {','.join(timed_out)}"
+        if mode == "auto" and late:
+            log(f"대기가 길어 이 {len(late)}개 서열은 로컬 BLAST+ ({local_db})로 넘깁니다.")
+            try:
+                results.update(run_local(late, local_db, Path(outdir), log, blastn=blastn))
+            except LocalBlastUnavailable as exc:
+                raise LocalBlastUnavailable(
+                    f"{exc} NCBI는 아직 WAITING 입니다. {links} 나중에 {reuse_flag}",
+                    {**results, **(exc.partial or {})},
+                ) from exc
+        elif late:
+            raise LocalBlastUnavailable(
+                f"NCBI가 {max_wait / 60:.0f}분 안에 READY가 되지 않았습니다. {links} "
+                f"나중에 {reuse_flag}",
+                results,
+            )
+    if remote_n < len(chunks):
+        rest = [q for ch in chunks[remote_n:] for q in ch]
+        try:
+            local_results = run_local(rest, local_db, Path(outdir), log, blastn=blastn)
+        except LocalBlastUnavailable as exc:
+            exc.partial = results
+            raise
+        for item in local_results.values():
+            item["elapsed"] = item.get("elapsed") or 0
+        results.update(local_results)
+        log(f"로컬 BLAST+ ({local_db}) {len(rest)}개 서열 완료")
     return results
 
 
@@ -207,6 +282,9 @@ def make_record(row, sample_id, res, level, comment, merge) -> dict:
         blast_version=res.get("blast_version"),
         elapsed_s=round(res.get("elapsed") or 0, 1),
         verified="",
+        source=res.get("source"),
+        search_backend=res.get("backend") or "remote",
+        local_db=res.get("local_db") or "",
         top15=[
             {k: h[k] for k in ("name", "accession", "max_s", "total_s", "qc_s", "e_s", "pi_s", "acc_len")}
             for h in res["hits"][:15]
@@ -254,14 +332,78 @@ def _close_number(cell, expected, *, evalue=False) -> bool:
     return abs(a - b) <= 1e-8
 
 
+def _rerun_local_entries(entries, ws, template, field_cols, log):
+    """로컬 행의 서열을 시트에서 읽어 BLAST+를 다시 실행한다. 값은 행 번호 → 결과 또는 오류 문자열."""
+    if not entries:
+        return {}
+    from blastid.localblast import run_local
+
+    grouped: dict[str, list] = {}
+    out = {}
+    seq_col = field_cols.get(template.sequence_field)
+    for entry in entries:
+        row = entry["row"]
+        if not seq_col:
+            out[row] = "서열 열이 없어 로컬 재검증을 할 수 없습니다"
+            continue
+        seq = clean_seq(ws.cell(row, seq_col).value, 1)
+        if not seq:
+            out[row] = "시트에서 서열을 읽지 못했습니다"
+            continue
+        db = entry.get("local_db") or "ITS_RefSeq_Fungi"
+        grouped.setdefault(db, []).append((entry, seq))
+    for db, group in grouped.items():
+        queries = [
+            dict(key=entry["row"], label=f"row{entry['row']}", seq=seq)
+            for entry, seq in group
+        ]
+        try:
+            import tempfile
+
+            found = run_local(queries, db, Path(tempfile.mkdtemp(prefix="blastid-verify-")), log)
+        except Exception as exc:
+            for entry, _seq in group:
+                out[entry["row"]] = str(exc)
+            continue
+        for entry, seq in group:
+            result = found.get(entry["row"])
+            if not result or not result["hits"]:
+                out[entry["row"]] = None
+                continue
+            top = result["hits"][0]
+            out[entry["row"]] = dict(
+                qlen=result["qlen"],
+                name=top["name"],
+                max=top["max"],
+                total=top["total"],
+                qc=top["qc"],
+                evalue=top["evalue"],
+                pi=top["pi"],
+                acc_len=top["acc_len"],
+                accession=top["accession"],
+                taxid=top.get("taxid"),
+            )
+    return out
+
+
+def _is_local_entry(entry: dict) -> bool:
+    return entry.get("backend") == "local" or str(entry.get("rid") or "").startswith("local")
+
+
 def verify(ncbi, ws, template: Template, field_cols: dict[str, int], entries: list[dict], log=print, pause: float = 1.0):
-    """저장된 시트를 RID XML·Taxonomy 재조회로 셀마다 비교."""
+    """저장된 시트를 RID XML·Taxonomy 재조회로 셀마다 비교. 로컬 행은 BLAST+를 다시 돌린다."""
+    remote_entries = [e for e in entries if not _is_local_entry(e)]
+    local_entries = [e for e in entries if _is_local_entry(e)]
     xml_cache = {}
-    for rid in sorted({e["rid"] for e in entries}):
+    for rid in sorted({e["rid"] for e in remote_entries}):
         xml_cache[rid] = parse_xml_report(ncbi.get_xml(rid))
         if pause:
             time.sleep(pause)
-    tax = ncbi.taxonomy(e["taxid"] for e in entries if e.get("taxid"))
+    local_cache = _rerun_local_entries(local_entries, ws, template, field_cols, log)
+    tax = ncbi.taxonomy(e["taxid"] for e in remote_entries if e.get("taxid"))
+    local_taxids = [item["taxid"] for item in local_cache.values() if isinstance(item, dict) and item.get("taxid")]
+    if local_taxids:
+        tax.update(ncbi.taxonomy(local_taxids))
     checks = [
         ("scientific_name", "name", "str"),
         ("max_score", "max", "num"),
@@ -277,7 +419,14 @@ def verify(ncbi, ws, template: Template, field_cols: dict[str, int], entries: li
     for e in entries:
         r = e["row"]
         bad = []
-        x = xml_cache[e["rid"]][e["query_index"] - 1] if e["query_index"] - 1 < len(xml_cache[e["rid"]]) else None
+        if _is_local_entry(e):
+            x = local_cache.get(r)
+            if isinstance(x, str):
+                problems[r] = [x]
+                log(f"  검증 {r}행: 불일치 {x}")
+                continue
+        else:
+            x = xml_cache[e["rid"]][e["query_index"] - 1] if e["query_index"] - 1 < len(xml_cache[e["rid"]]) else None
         name_col = field_cols.get("scientific_name")
         cell_name = ws.cell(r, name_col).value if name_col else None
         if x is None:
@@ -286,8 +435,9 @@ def verify(ncbi, ws, template: Template, field_cols: dict[str, int], entries: li
         else:
             if x["qlen"] != e["seq_len"]:
                 bad.append(f"query 길이 {x['qlen']} ≠ 서열 {e['seq_len']}")
+            shown_name = x.get("name") if _is_local_entry(e) and x.get("name") else e.get("name_json")
             expected = {
-                "name": e.get("name_json"),
+                "name": shown_name,
                 "max": x["max"],
                 "total": x["total"],
                 "qc": x["qc"],
@@ -296,15 +446,20 @@ def verify(ncbi, ws, template: Template, field_cols: dict[str, int], entries: li
                 "acc_len": x["acc_len"],
                 "accession": x["accession"],
             }
-            tinfo = tax.get(str(e.get("taxid")))
+            taxid = x.get("taxid") if _is_local_entry(e) else e.get("taxid")
+            tinfo = tax.get(str(taxid)) if taxid else None
             if "lineage" in field_cols:
-                if not tinfo:
+                cell_lineage = ws.cell(r, field_cols["lineage"]).value
+                if not taxid:
+                    if cell_lineage not in (None, ""):
+                        bad.append("taxid가 없어 lineage를 다시 확인하지 못했습니다")
+                elif not tinfo:
                     bad.append("taxonomy 조회 실패")
                 else:
                     expected["lineage"] = fungi_lineage(tinfo["lineage_full"])
-                    if tinfo["name"] != e.get("name_json"):
+                    if tinfo["name"] != shown_name:
                         log(
-                            f"  (참고) {r}행: BLAST 표시명 '{e.get('name_json')}' "
+                            f"  (참고) {r}행: BLAST 표시명 '{shown_name}' "
                             f"vs Taxonomy 현재명 '{tinfo['name']}'"
                         )
             for fld, key, kind in checks:
@@ -425,7 +580,10 @@ def _apply(wb, ws, template, cols, queries, results, args, outdir, log, *, write
             rr["hits"], args.min_ident, args.min_cover, args.alt_margin
         )
         level, comment = combine_review(blast_level, blast_comment, q.get("merge"))
-        if comment:
+        if rr.get("backend") == "local":
+            note = local_note(rr.get("db") or "local")
+            comment = f"{comment} {note}".strip() if comment else note
+        elif comment:
             comment = f"{comment} (RID {rr['rid']})"
         row = q["row"]
         if level:
@@ -457,7 +615,7 @@ def _apply(wb, ws, template, cols, queries, results, args, outdir, log, *, write
 
                 render_table(
                     png,
-                    f"{row}행 {q['sample_id']}  |  RID {rr['rid']}  |  query {rr['qlen']} bp  |  core_nt megablast",
+                    f"{row}행 {q['sample_id']}  |  {rr.get('source') or rr['rid']}  |  query {rr['qlen']} bp",
                     rr["hits"],
                 )
                 place_shot(wb, ws, row, png, f"{row}행 {q['sample_id']} — {comment}", template, cols)
@@ -473,6 +631,8 @@ def _apply(wb, ws, template, cols, queries, results, args, outdir, log, *, write
                 seq_len=len(q["seq"]),
                 taxid=rr["hits"][0]["taxid"] if rr["hits"] else None,
                 name_json=rr["hits"][0]["name"] if rr["hits"] else None,
+                backend=rr.get("backend") or "remote",
+                local_db=rr.get("local_db") or "",
             )
         )
         mark = f"  ⚠ {level}" if level else ""
@@ -489,7 +649,8 @@ def _apply(wb, ws, template, cols, queries, results, args, outdir, log, *, write
             old = level_from_comment(ws.cell(r, comment_col).value)
             if old:
                 flags[r] = old
-    style_sheet(ws, template, cols, flags)
+    local_rows = {q["row"] for q in queries if results[q["key"]].get("backend") == "local"}
+    style_sheet(ws, template, cols, flags, local_rows)
     return records, entries
 
 
@@ -523,11 +684,14 @@ def _job_email(args):
 def blast_queries(queries, args, outdir, log, ncbi=None):
     if not queries:
         log("BLAST할 서열이 없습니다.")
-        return None, None
+        return None, None, None
     reuse = _reuse(args)
     batch = max(1, int(getattr(args, "batch_size", 10) or 10))
-    n_searches = 0 if reuse else math.ceil(len(queries) / batch)
     usage = UsageLog()
+    backend = getattr(args, "backend", "auto") or "auto"
+    limit = int(getattr(args, "remote_limit", 100) or 100)
+    n_batches = 0 if reuse else math.ceil(len(queries) / batch)
+    n_searches = remote_batch_budget(usage.count(), n_batches, limit, "remote" if reuse else backend)
     plan = plan_submission(
         n_searches,
         bool(getattr(args, "off_hours", False)),
@@ -540,17 +704,38 @@ def blast_queries(queries, args, outdir, log, ncbi=None):
         for q in queries:
             log(f"[dry-run] {q['sample_id']}  {len(q['seq'])} bp")
         log("dry-run: NCBI에 제출하지 않았습니다.")
-        return None, None
+        return None, None, None
     if plan.wait_until is not None:
         sleep_until(plan.wait_until, log)
     ncbi = ncbi or NCBI(log, email=_job_email(args))
     if not ncbi.email:
         log("이메일을 보내지 않습니다. NCBI_EMAIL 또는 작업창의 이메일이 비어 있습니다.")
     log(DISCLAIMER_KO)
-    res = run_blast(ncbi, queries, batch, outdir, log, reuse, usage=usage)
+    try:
+        res = run_blast(
+            ncbi,
+            queries,
+            batch,
+            outdir,
+            log,
+            reuse,
+            usage=usage,
+            backend=getattr(args, "backend", "auto") or "auto",
+            remote_limit=int(getattr(args, "remote_limit", 100) or 100),
+            local_db=getattr(args, "local_db", None) or "ITS_RefSeq_Fungi",
+            blastn=getattr(args, "blastn", None),
+            max_wait=float(getattr(args, "max_wait", 60) or 60) * 60.0,
+        )
+    except LocalBlastUnavailable as exc:
+        partial = exc.partial or {}
+        if partial:
+            check_params(partial, log)
+            add_taxonomy(ncbi, partial, log)
+        log(str(exc))
+        return ncbi, partial, str(exc)
     check_params(res, log)
     add_taxonomy(ncbi, res, log)
-    return ncbi, res
+    return ncbi, res, None
 
 
 def run_excel(args, template: Template, outdir: Path, log):
@@ -575,11 +760,15 @@ def run_excel(args, template: Template, outdir: Path, log):
     cols = ensure_fields(ws, template, cols, log)
     queries = _excel_queries(ws, template, cols, args, log)
     t0 = time.time()
-    ncbi, res = blast_queries(queries, args, outdir, log)
+    ncbi, res, stopped = blast_queries(queries, args, outdir, log)
     if res is None:
         return
-    records, entries = _apply(wb, ws, template, cols, queries, res, args, outdir, log, write_inputs=False)
-    _finish(ncbi, wb, out, ws.title, template, cols, entries, records, args, outdir, log, t0, len(queries))
+    done = [q for q in queries if q["key"] in res]
+    if done:
+        records, entries = _apply(wb, ws, template, cols, done, res, args, outdir, log, write_inputs=False)
+        _finish(ncbi, wb, out, ws.title, template, cols, entries, records, args, outdir, log, t0, len(done))
+    if stopped:
+        raise SystemExit(stopped)
 
 
 def run_fresh(queries, args, template: Template, outdir: Path, log):
@@ -588,8 +777,13 @@ def run_fresh(queries, args, template: Template, outdir: Path, log):
         log("BLAST할 서열이 없습니다.")
         return
     t0 = time.time()
-    ncbi, res = blast_queries(queries, args, outdir, log)
+    ncbi, res, stopped = blast_queries(queries, args, outdir, log)
     if res is None:
+        return
+    queries = [q for q in queries if q["key"] in res]
+    if not queries:
+        if stopped:
+            raise SystemExit(stopped)
         return
     wb = new_workbook(template)
     sheet_name = args.sheet or template.sheet
@@ -607,7 +801,9 @@ def run_fresh(queries, args, template: Template, outdir: Path, log):
     cols = ensure_fields(ws, template, cols, log)
     records, entries = _apply(wb, ws, template, cols, queries, res, args, outdir, log, write_inputs=True)
     out = Path(args.output) if args.output else Path(outdir) / "blast_results.xlsx"
-    _finish(ncbi, wb, out, ws.title, template, cols, entries, records, args, outdir, log, t0, len(queries))
+    _finish(ncbi, wb, out, ws.title, template, cols, entries, records, args, outdir, log, t0, len(queries) or 1)
+    if stopped:
+        raise SystemExit(stopped)
 
 
 def load_fasta_queries(paths, min_len, log) -> list[dict]:

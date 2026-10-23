@@ -25,6 +25,7 @@ EXPECTED_HEADERS = [
     "Acc. Len",
     "Accession",
     "Lineage",
+    "검색 출처",
     "검토 코멘트 / 스크린샷",
     "스크린샷 (링크)",
 ]

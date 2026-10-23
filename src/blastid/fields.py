@@ -42,6 +42,7 @@ FIELD_HELP: dict[str, str] = {
     "merge_warning": "합침 경고 문장",
     "direction": "F / R / FR",
     "qlen": "BLAST query 길이",
+    "source": "NCBI 웹 core_nt RID 또는 로컬 BLAST+ 데이터베이스",
 }
 
 # 기존 워크북에 다시 쓸 때 입력 열(ID, Seq 등)은 덮어쓰지 않는다.
@@ -73,6 +74,7 @@ def build_field_values(
         "screenshot": None,
         "trimmed_len": len(sequence) if sequence else None,
         "qlen": (blast or {}).get("qlen"),
+        "source": (blast or {}).get("source"),
     }
     if top is None and blast is not None:
         values.update(

@@ -1,10 +1,12 @@
 """로컬 서버는 작업창이 넘긴 행만 받고, NCBI 고지를 보여 준다."""
 import time
+from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from blastid.ncbi import TOOL_NAME, blast_identity_params
-from blastid.server import create_app, ensure_dev_cert
+from blastid.server import addin_dir, create_app, ensure_dev_cert, serve
 
 
 def test_dev_cert_is_created(tmp_path):
@@ -58,3 +60,22 @@ def test_job_dry_run_lists_rows_without_ncbi(monkeypatch):
     assert manifest.status_code == 200
     assert b"TaskPaneApp" in manifest.content
     assert b"taskpane.html" in manifest.content
+    page = client.get("/taskpane.html")
+    assert page.status_code == 200
+    assert "RID 최대 대기" in page.text
+
+
+def test_missing_addin_fails_at_startup(monkeypatch):
+    monkeypatch.delenv("BLASTID_ADDIN", raising=False)
+    real = Path.is_file
+
+    def hidden(self):
+        if self.name == "taskpane.html":
+            return False
+        return real(self)
+
+    monkeypatch.setattr(Path, "is_file", hidden)
+    with pytest.raises(RuntimeError, match="taskpane.html"):
+        addin_dir()
+    with pytest.raises(SystemExit, match="taskpane.html"):
+        serve()

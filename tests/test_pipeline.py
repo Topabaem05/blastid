@@ -63,7 +63,7 @@ class FakeNCBI:
         self.submitted.append(fasta)
         return "FAKERID", 0
 
-    def wait_all(self, jobs):
+    def wait_all(self, jobs, max_wait=3600):
         import time
 
         return {rid: time.time() for rid in jobs}
@@ -289,7 +289,7 @@ def test_blast_request_omits_email_unless_env(monkeypatch):
     assert ncbi2.Entrez.api_key == "secret-key"
 
 
-def test_reuse_rids_skips_submit():
+def test_reuse_rids_skips_submit(tmp_path):
     seq = "ACGT" * 20
     fake = FakeNCBI([("S", seq, [_spec("Pyxine copelandii", "EU670225.1", len(seq), len(seq), len(seq))])])
 
@@ -298,8 +298,140 @@ def test_reuse_rids_skips_submit():
 
     fake.submit = nope
     queries = [dict(key=0, label="S", seq=seq)]
-    res = run_blast(fake, queries, 10, "/tmp", log=lambda *_: None, reuse=["FAKERID"])
+    notes = []
+    from blastid.policy import UsageLog
+
+    usage = UsageLog(tmp_path / "usage.json")
+    res = run_blast(
+        fake, queries, 10, tmp_path, log=notes.append, reuse=["FAKERID"], usage=usage
+    )
+    text = "\n".join(notes)
+    assert "기존 RID 재사용" in text
+    assert "제출:" not in text
+    assert usage.count() == 0
     assert res[0]["hits"][0]["accession"] == "EU670225.1"
+
+
+def test_new_submit_is_counted(tmp_path):
+    seq = "ACGT" * 20
+    fake = FakeNCBI([("S", seq, [_spec("Pyxine copelandii", "EU670225.1", len(seq), len(seq), len(seq))])])
+    from blastid.policy import UsageLog
+
+    usage = UsageLog(tmp_path / "usage.json")
+    notes = []
+    run_blast(fake, [dict(key=0, label="S", seq=seq)], 10, tmp_path, log=notes.append, usage=usage)
+    text = "\n".join(notes)
+    assert "제출: RID FAKERID" in text
+    assert "기존 RID 재사용" not in text
+    assert usage.count() == 1
+
+
+def test_waiting_rid_stops_at_max_wait(monkeypatch):
+    from blastid.ncbi import NCBI, NcbiWaitTimeout
+
+    clock = {"t": 1_000_000.0}
+
+    monkeypatch.setattr("blastid.ncbi.time.time", lambda: clock["t"])
+
+    def fake_sleep(seconds):
+        clock["t"] += seconds
+
+    monkeypatch.setattr("blastid.ncbi.time.sleep", fake_sleep)
+    ncbi = NCBI(log=lambda *_a: None, email="")
+
+    def waiting(rid):
+        ncbi._last_poll[rid] = clock["t"]
+        return "WAITING"
+
+    ncbi.status = waiting
+    with pytest.raises(NcbiWaitTimeout) as caught:
+        ncbi.wait_all({"DPFJXTPT014": (clock["t"], 0)}, max_wait=120)
+    message = str(caught.value)
+    assert caught.value.rids == ["DPFJXTPT014"]
+    assert "reuse-rids" in message
+    assert "Blast.cgi?CMD=Get&RID=DPFJXTPT014" in message
+    assert clock["t"] < 1_000_000.0 + 180
+
+
+def test_auto_timeout_uses_local_blast(tmp_path, monkeypatch):
+    from blastid.localblast import LocalBlastUnavailable
+    from blastid.ncbi import NcbiWaitTimeout
+
+    seq = "ACGT" * 20
+    fake = FakeNCBI([("S", seq, [_spec("Pyxine copelandii", "EU670225.1", len(seq), len(seq), len(seq))])])
+
+    def stuck(jobs, max_wait=3600):
+        raise NcbiWaitTimeout(list(jobs), {}, max_wait / 60.0)
+
+    fake.wait_all = stuck
+    seen = {}
+
+    def local(queries, db, outdir, log, blastn=None):
+        seen["queries"] = list(queries)
+        seen["db"] = db
+        return {
+            q["key"]: {
+                "rid": f"local:{db}",
+                "rid_url": "",
+                "backend": "local",
+                "hits": [],
+                "db": db,
+                "source": f"로컬 BLAST+ ({db})",
+                "elapsed": 1,
+                "qlen": len(q["seq"]),
+                "seq_len": len(q["seq"]),
+                "query_index": 1,
+                "params": {},
+                "blast_version": "local",
+            }
+            for q in queries
+        }
+
+    monkeypatch.setattr("blastid.pipeline.run_local", local)
+    notes = []
+    res = run_blast(
+        fake,
+        [dict(key=0, label="S", seq=seq)],
+        10,
+        tmp_path,
+        log=notes.append,
+        backend="auto",
+        max_wait=3600,
+    )
+    assert seen["db"] == "ITS_RefSeq_Fungi"
+    assert res[0]["backend"] == "local"
+    assert any("로컬 BLAST+" in line for line in notes)
+
+    def missing(*_a, **_k):
+        raise LocalBlastUnavailable("blastn 실행 파일이 없습니다. blastid setup-local")
+
+    monkeypatch.setattr("blastid.pipeline.run_local", missing)
+    with pytest.raises(LocalBlastUnavailable) as caught:
+        run_blast(
+            fake,
+            [dict(key=0, label="S", seq=seq)],
+            10,
+            tmp_path,
+            log=lambda *_a: None,
+            backend="remote",
+            max_wait=3600,
+        )
+    assert "FAKERID" in str(caught.value)
+    assert "reuse-rids" in str(caught.value)
+    assert "setup-local" not in str(caught.value)
+    with pytest.raises(LocalBlastUnavailable) as fallen:
+        run_blast(
+            fake,
+            [dict(key=0, label="S", seq=seq)],
+            10,
+            tmp_path,
+            log=lambda *_a: None,
+            backend="auto",
+            max_wait=3600,
+        )
+    assert "FAKERID" in str(fallen.value)
+    assert "reuse-rids" in str(fallen.value)
+    assert "setup-local" in str(fallen.value)
 
 
 def test_template_roundtrip_values_equal_web_values(tmp_path):

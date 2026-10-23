@@ -10,6 +10,9 @@ const DEFAULTS = {
   batchSize: 10,
   email: "",
   offHours: false,
+  backend: "auto",
+  localDb: "ITS_RefSeq_Fungi",
+  maxWait: 60,
 };
 
 const FILL = { strange: "#F8CBAD", ambiguous: "#FFF2CC", ok: "#E2EFDA" };
@@ -74,6 +77,9 @@ function readForm() {
     batchSize: Number(document.getElementById("batch-size").value),
     email: document.getElementById("email").value.trim(),
     offHours: document.getElementById("off-hours").checked,
+    backend: document.getElementById("backend").value,
+    localDb: document.getElementById("local-db").value.trim() || "ITS_RefSeq_Fungi",
+    maxWait: Number(document.getElementById("max-wait").value) || 60,
   };
 }
 
@@ -87,6 +93,9 @@ function fillForm(settings) {
   document.getElementById("batch-size").value = settings.batchSize;
   document.getElementById("email").value = settings.email || "";
   document.getElementById("off-hours").checked = Boolean(settings.offHours);
+  document.getElementById("backend").value = settings.backend || "auto";
+  document.getElementById("local-db").value = settings.localDb || "ITS_RefSeq_Fungi";
+  document.getElementById("max-wait").value = settings.maxWait || 60;
   document.getElementById("template-file").dataset.yaml = settings.templateYaml || "";
   toggleYaml();
 }
@@ -202,7 +211,8 @@ async function writeResults(result) {
     const resultCols = columns.filter((c) => c.role === "result" && index[c.field] >= 0).map((c) => index[c.field]);
     for (const update of updates) {
       const r = update.row - 1;
-      const fill = update.level === "strange" ? FILL.strange : update.level === "ambiguous" ? FILL.ambiguous : FILL.ok;
+      const local = update.backend === "local" || String(update.rid || "").startsWith("local");
+      const fill = update.level === "strange" ? FILL.strange : update.level === "ambiguous" ? FILL.ambiguous : local ? "#D6E3F0" : FILL.ok;
       for (const [field, value] of Object.entries(update.values || {})) {
         const col = index[field];
         if (col == null || col < 0 || field === "screenshot") continue;
@@ -213,6 +223,9 @@ async function writeResults(result) {
       }
       for (const col of resultCols) {
         sheet.getCell(r, col).format.fill.color = fill;
+      }
+      if (local && index.source >= 0) {
+        sheet.getCell(r, index.source).format.fill.color = "#D6E3F0";
       }
       sheet.getRangeByIndexes(r, 0, 1, 1).format.rowHeight = 30;
     }
@@ -321,6 +334,9 @@ async function runBlast() {
         batch_size: settings.batchSize,
         email: settings.email,
         off_hours: settings.offHours,
+        backend: settings.backend,
+        local_db: settings.localDb,
+        max_wait: settings.maxWait,
         template_yaml: settings.templateMode === "yaml" ? settings.templateYaml : null,
       }),
     });
@@ -344,6 +360,10 @@ async function showDisclaimer() {
     document.getElementById("disclaimer-ko").textContent = body.ko || "";
     document.getElementById("disclaimer-en").textContent = body.en || "";
     document.getElementById("window").textContent = body.window || "";
+    const usage = await fetch("/api/usage");
+    const counted = await usage.json();
+    document.getElementById("usage").textContent =
+      `최근 24시간 원격 검색 ${counted.count} / ${counted.limit}. 한도를 넘기면 나머지는 로컬 BLAST+입니다.`;
   } catch (_e) {
     document.getElementById("disclaimer-ko").textContent = "고지문을 서버에서 읽지 못했습니다. blastid serve 가 켜져 있는지 확인하세요.";
   }

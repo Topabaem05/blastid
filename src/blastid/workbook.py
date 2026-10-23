@@ -246,7 +246,7 @@ def place_shot(wb, ws, row: int, png: Path, caption: str, template: Template, fi
     cell.font = Font(color=_color(template.style.get("link_font"), "0563C1"), underline="single")
 
 
-def style_sheet(ws, template: Template, field_cols: dict[str, int], flags: dict[int, str]):
+def style_sheet(ws, template: Template, field_cols: dict[str, int], flags: dict[int, str], local_rows: set | None = None):
     style = template.style
     header_fill = PatternFill("solid", fgColor=_color(style.get("header_fill"), "1F4E78"))
     header_font = Font(bold=True, color=_color(style.get("header_font"), "FFFFFF"), size=int(style.get("header_size") or 11))
@@ -256,6 +256,9 @@ def style_sheet(ws, template: Template, field_cols: dict[str, int], flags: dict[
     res = PatternFill("solid", fgColor=_color(style.get("result_fill"), "E2EFDA"))
     yel = PatternFill("solid", fgColor=_color(style.get("ambiguous_fill"), "FFF2CC"))
     red = PatternFill("solid", fgColor=_color(style.get("strange_fill"), "F8CBAD"))
+    local_fill = PatternFill("solid", fgColor=_color(style.get("local_fill"), "D6E3F0"))
+    local_rows = local_rows or set()
+    source_col = field_cols.get("source")
     header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
     hr = template.header_row
     last_col = max([ws.max_column or 1, *field_cols.values()])
@@ -298,10 +301,14 @@ def style_sheet(ws, template: Template, field_cols: dict[str, int], flags: dict[
             cell.alignment = Alignment(vertical="center", wrap_text=(c in wrap_cols))
             if c == seq_col:
                 continue
-            if c in result_cols and lvl == "strange":
+            if c == source_col and r in local_rows:
+                cell.fill = local_fill
+            elif c in result_cols and lvl == "strange":
                 cell.fill = red
             elif c in result_cols and lvl == "ambiguous":
                 cell.fill = yel
+            elif c in result_cols and r in local_rows:
+                cell.fill = local_fill
             elif c in result_cols and named:
                 cell.fill = res
             elif r % 2 == 0:

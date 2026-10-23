@@ -31,7 +31,15 @@ blastid = "blastid.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-blastid = ["data/*.yaml", "data/*.xlsx"]
+blastid = [
+  "data/*.yaml",
+  "data/*.xlsx",
+  "addin/*.html",
+  "addin/*.js",
+  "addin/*.css",
+  "addin/*.xml",
+  "addin/assets/*.png",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

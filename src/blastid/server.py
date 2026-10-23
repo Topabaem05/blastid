@@ -36,21 +36,18 @@ FILL = {"strange": "F8CBAD", "ambiguous": "FFF2CC"}
 
 def addin_dir() -> Path:
     env = __import__("os").environ.get("BLASTID_ADDIN", "").strip()
-    here = Path(__file__).resolve()
+    packaged = Path(__file__).resolve().parent / "addin"
     candidates = []
     if env:
         candidates.append(Path(env))
-    candidates.extend(
-        [
-            Path.cwd() / "addin",
-            here.parents[2] / "addin",
-            here.parent / "addin",
-        ]
-    )
+    candidates.append(packaged)
     for cand in candidates:
-        if (cand / "taskpane.html").exists():
+        if (cand / "taskpane.html").is_file():
             return cand
-    raise FileNotFoundError("addin/taskpane.html 을 찾지 못했습니다. 저장소 루트에서 실행하세요.")
+    raise RuntimeError(
+        "작업창 파일 taskpane.html 이 설치본에 없습니다. "
+        "blastid를 소스에서 다시 설치하거나 BLASTID_ADDIN 으로 addin 폴더를 지정하세요."
+    )
 
 
 class JobRequest(BaseModel):
@@ -66,6 +63,10 @@ class JobRequest(BaseModel):
     template_yaml: str | None = None
     min_seq_len: int = 50
     dry_run: bool = False
+    backend: str = "auto"
+    remote_limit: int = 100
+    local_db: str = "ITS_RefSeq_Fungi"
+    max_wait: float = 60
 
 
 class _Opt:
@@ -81,6 +82,11 @@ class _Opt:
         self.template_yaml = body.template_yaml
         self.min_seq_len = body.min_seq_len
         self.dry_run = body.dry_run
+        self.backend = body.backend or "auto"
+        self.remote_limit = body.remote_limit
+        self.local_db = body.local_db or "ITS_RefSeq_Fungi"
+        self.max_wait = body.max_wait
+        self.blastn = None
         self.reuse_rids = None
 
 
@@ -131,20 +137,28 @@ def identify_rows(rows: list[dict], options: _Opt, log, outdir: Path | None = No
             )
         )
     unique_labels(queries)
-    payload = {"columns": _columns(template), "updates": [], "dry_run": bool(options.dry_run)}
-    _ncbi, results = blast_queries(queries, options, outdir, log)
+    payload = {"columns": _columns(template), "updates": [], "dry_run": bool(options.dry_run), "stopped": None}
+    _ncbi, results, stopped = blast_queries(queries, options, outdir, log)
+    payload["stopped"] = stopped
     if results is None:
         return payload
     shots = outdir / "shots"
     shots.mkdir(exist_ok=True)
     formats = {c.field: c.number_format for c in template.columns if c.field and c.number_format}
     for query in queries:
+        if query["key"] not in results:
+            continue
         result = results[query["key"]]
         level, comment = combine_review(
             *assess(result["hits"], options.min_ident, options.min_cover, options.alt_margin),
             None,
         )
-        if comment:
+        if result.get("backend") == "local":
+            from blastid.localblast import local_note
+
+            note = local_note(result.get("db") or "")
+            comment = f"{comment} {note}".strip() if comment else note
+        elif comment:
             comment = f"{comment} (RID {result['rid']})"
         from blastid.fields import build_field_values
 
@@ -178,6 +192,7 @@ def identify_rows(rows: list[dict], options: _Opt, log, outdir: Path | None = No
         payload["updates"].append(
             {
                 "row": query["row"],
+                "backend": result.get("backend") or "remote",
                 "level": level,
                 "fill": FILL.get(level or ""),
                 "values": kept,
@@ -249,6 +264,13 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    @app.get("/api/usage")
+    def usage():
+        from blastid.policy import UsageLog
+
+        log = UsageLog()
+        return {"count": log.count(), "limit": 100, "window": describe_window(datetime.now(ET_ZONE))}
+
     @app.get("/api/health")
     def health():
         return {
@@ -277,8 +299,13 @@ def create_app() -> FastAPI:
             try:
                 outdir = default_outdir(None)
                 job.result = identify_rows(body.rows, _Opt(body), job.log, outdir)
-                job.status = "done"
-                job.log("완료")
+                stopped = (job.result or {}).get("stopped")
+                if stopped and not (job.result or {}).get("updates"):
+                    job.status = "error"
+                    job.error = stopped
+                else:
+                    job.status = "done"
+                    job.log("완료" if not stopped else stopped)
             except (Exception, SystemExit) as exc:
                 job.status = "error"
                 job.error = str(exc) or exc.__class__.__name__
@@ -294,16 +321,13 @@ def create_app() -> FastAPI:
             raise HTTPException(404, "작업을 찾지 못했습니다.")
         return job.snapshot()
 
-    try:
-        static = addin_dir()
-    except FileNotFoundError:
-        static = None
-    if static is not None:
-        @app.get("/manifest.xml")
-        def manifest():
-            return FileResponse(static / "manifest.xml", media_type="application/xml")
+    static = addin_dir()
 
-        app.mount("/", StaticFiles(directory=str(static), html=False), name="addin")
+    @app.get("/manifest.xml")
+    def manifest():
+        return FileResponse(static / "manifest.xml", media_type="application/xml")
+
+    app.mount("/", StaticFiles(directory=str(static), html=False), name="addin")
     return app
 
 
@@ -340,11 +364,16 @@ def serve(host: str = "127.0.0.1", port: int = 8787) -> None:
 
     if host not in {"127.0.0.1", "localhost"}:
         raise SystemExit("blastid serve 는 이 컴퓨터(127.0.0.1)에서만 엽니다.")
+    try:
+        addin_dir()
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
     cert, key = ensure_dev_cert()
     print(f"blastid 작업창: https://localhost:{port}/taskpane.html")
     print(f"매니페스트: https://localhost:{port}/manifest.xml")
     print(f"인증서: {cert}")
-    print("Excel에서 이 인증서를 신뢰한 뒤 addin/manifest.xml 을 사이드로드하세요.")
+    print("Excel에서 이 인증서를 신뢰한 뒤 src/blastid/addin/manifest.xml 을 사이드로드하세요.")
+    print("pip로 설치한 경우에도 같은 파일이 패키지에 들어 있고, 없으면 서버가 여기서 멈춥니다.")
     print(DISCLAIMER_KO)
     uvicorn.run(
         create_app(),

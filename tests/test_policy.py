@@ -1,7 +1,7 @@
 """한가한 시간(미국 동부, 서머타임 포함)과 24시간 검색 수."""
 import tempfile
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from blastid.ncbi import EUTILS_MIN_INTERVAL, pace_eutils
@@ -13,8 +13,43 @@ from blastid.policy import (
     is_off_hours,
     kst_night_bounds,
     next_off_hours_start,
+    off_hours_span,
     plan_submission,
 )
+
+def test_weekend_window_is_one_kst_span():
+    """금요일 밤부터 월요일 새벽까지는 한국 시간으로 한 구간이다."""
+    friday_evening = datetime(2026, 10, 23, 20, 0, tzinfo=KST)
+    assert friday_evening.weekday() == 4
+    start, end = off_hours_span(friday_evening)
+    assert start.astimezone(KST) == datetime(2026, 10, 24, 10, 0, tzinfo=KST)
+    assert end.astimezone(KST) == datetime(2026, 10, 26, 18, 0, tzinfo=KST)
+    text = describe_window(friday_evening)
+    assert "10-24 10:00" in text and "10-26 18:00" in text
+    # 한겨울(EST)에는 같은 금요일이 11:00–19:00 KST로 밀린다.
+    winter_friday = datetime(2026, 1, 16, 20, 0, tzinfo=KST)
+    assert winter_friday.weekday() == 4
+    wstart, wend = off_hours_span(winter_friday)
+    assert wstart.astimezone(KST).hour == 11
+    assert wend.astimezone(KST).hour == 19
+    assert (wend.astimezone(ET) - wstart.astimezone(ET)) > timedelta(days=2)
+    # 주 중 밤은 8시간만.
+    wed = datetime(2026, 7, 15, 15, 0, tzinfo=ET)
+    nstart, nend = off_hours_span(wed)
+    assert nstart.astimezone(ET).hour == 21
+    assert nend.astimezone(ET).hour == 5
+    assert (nend - nstart) == timedelta(hours=8)
+
+
+def test_remote_budget_stops_at_the_limit():
+    from blastid.policy import remote_batch_budget
+
+    assert remote_batch_budget(99, 5, 100, "auto") == 1
+    assert remote_batch_budget(100, 5, 100, "auto") == 0
+    assert remote_batch_budget(0, 3, 100, "local") == 0
+    assert remote_batch_budget(100, 3, 100, "remote") == 3
+    assert remote_batch_budget(0, 150, 100, "auto") == 100
+
 
 def test_off_hours_window_respects_dst():
     summer_night = datetime(2026, 7, 15, 21, 0, tzinfo=ET)

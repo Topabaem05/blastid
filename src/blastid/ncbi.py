@@ -43,6 +43,23 @@ FIRST_POLL = 20.0
 POLL_GAP = 60.0
 EUTILS_MIN_INTERVAL = 1.0 / 3.0
 RETRY_HTTP = {429, 500, 502, 503, 504}
+DEFAULT_MAX_WAIT = 60 * 60
+
+
+class NcbiWaitTimeout(RuntimeError):
+    """RID가 최대 대기 시간 동안 READY가 되지 않았다."""
+
+    def __init__(self, rids: list[str], ready: dict[str, float], waited_min: float):
+        self.rids = list(rids)
+        self.ready = dict(ready)
+        self.waited_min = waited_min
+        links = ", ".join(WEB_LINK.format(rid=rid) for rid in self.rids)
+        reuse = ",".join(self.rids)
+        super().__init__(
+            f"RID {', '.join(self.rids)} 가 {waited_min:.0f}분 동안 READY가 되지 않았습니다. "
+            f"NCBI 페이지: {links}  "
+            f"나중에 이어서 보려면 --reuse-rids {reuse}"
+        )
 _eutils_lock = threading.Lock()
 _eutils_next = 0.0
 
@@ -171,14 +188,25 @@ class NCBI:
             ]
         )
 
-    def wait_all(self, jobs: dict[str, tuple[float, int]]) -> dict[str, float]:
-        """jobs: {rid: (submit_time, rtoe)}. 모두 READY 될 때까지 확인."""
+    def wait_all(self, jobs: dict[str, tuple[float, int]], max_wait: float = 3600.0) -> dict[str, float]:
+        """jobs: {rid: (submit_time, rtoe)}. READY 되거나 RID별 최대 대기까지 확인."""
         pending = dict(jobs)
         done: dict[str, float] = {}
+        timed_out: list[str] = []
         while pending:
             now = time.time()
             nxt = []
             for rid, (t0, rtoe) in list(pending.items()):
+                if now - t0 >= max_wait:
+                    waited = (now - t0) / 60.0
+                    url = WEB_LINK.format(rid=rid)
+                    self.log(
+                        f"  RID {rid}: 대기 {waited:.0f}분 초과. {url}  "
+                        f"나중에 --reuse-rids {rid}"
+                    )
+                    timed_out.append(rid)
+                    del pending[rid]
+                    continue
                 if rid not in self._last_poll:
                     due = t0 + (max(FIRST_POLL, rtoe) if rtoe else 0)
                 else:
@@ -190,13 +218,15 @@ class NCBI:
                         done[rid] = time.time()
                         del pending[rid]
                     elif st in ("FAILED", "UNKNOWN"):
-                        raise RuntimeError(f"RID {rid} 상태 {st} (NCBI 측 실패/만료)")
+                        raise RuntimeError(f"RID {rid} 상태 {st} (NCBI 측 실패/만료). {WEB_LINK.format(rid=rid)}")
                     else:
-                        nxt.append(self._last_poll[rid] + POLL_GAP)
+                        nxt.append(min(self._last_poll[rid] + POLL_GAP, t0 + max_wait))
                 else:
-                    nxt.append(due)
+                    nxt.append(min(due, t0 + max_wait))
             if pending:
                 time.sleep(max(1.0, min(nxt) - time.time()))
+        if timed_out:
+            raise NcbiWaitTimeout(timed_out, done, max_wait / 60.0)
         return done
 
     def taxonomy(self, taxids) -> dict:
@@ -239,6 +269,8 @@ def rid_url(rid: str) -> str:
 
 def check_params(results: dict, log=print) -> None:
     for r in results.values():
+        if r.get("backend") == "local":
+            continue
         p = r.get("params") or {}
         if (
             r.get("db") != "core_nt"

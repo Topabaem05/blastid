@@ -40,6 +40,16 @@
     <label>최소 Per. Ident (%) <input id="min-ident" type="number" min="0" max="100" step="0.1" value="90"></label>
     <label>최소 Query Cover (%) <input id="min-cover" type="number" min="0" max="100" step="0.1" value="80"></label>
     <label>다른 속 허용 차이 (%p) <input id="alt-margin" type="number" min="0" max="100" step="0.1" value="2"></label>
+    <label>실행 위치
+      <select id="backend">
+        <option value="auto">자동 (24시간 100건을 넘기면 로컬 BLAST+)</option>
+        <option value="remote">항상 NCBI 웹</option>
+        <option value="local">항상 로컬 BLAST+</option>
+      </select>
+    </label>
+    <label>로컬 DB <input id="local-db" type="text" value="ITS_RefSeq_Fungi"></label>
+    <label>RID 최대 대기(분) <input id="max-wait" type="number" min="1" max="240" step="1" value="60"></label>
+    <p id="usage" class="hint"></p>
     <label>묶음 크기 (한 RID) <input id="batch-size" type="number" min="1" max="100" step="1" value="10"></label>
     <label>NCBI 이메일 (비워 두면 보내지 않음)
       <input id="email" type="email" placeholder="선택" autocomplete="off">

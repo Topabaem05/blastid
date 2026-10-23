@@ -25,6 +25,7 @@ style:
   result_fill: "E2EFDA"
   strange_fill: "F8CBAD"
   ambiguous_fill: "FFF2CC"
+  local_fill: "D6E3F0"
   border: "BFBFBF"
   link_font: "0563C1"
 columns:
@@ -111,6 +112,12 @@ columns:
     width: 60
     role: result
     wrap: true
+  - header: "검색 출처"
+    field: source
+    width: 42
+    role: result
+    wrap: true
+    aliases: ["Source", "출처", "DB"]
   - header: "검토 코멘트 / 스크린샷"
     field: comment
     width: 60

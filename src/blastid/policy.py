@@ -45,7 +45,9 @@ DISCLAIMER_KO = (
     "BLAST 웹 서비스는 공동 자원입니다. 제출 간격은 10초 이상, 같은 RID 확인은 1분에 한 번 이하, "
     "E-utilities는 초당 3회 이하로 호출합니다. "
     "한 번에 50건(RID 기준)을 넘기면 주말이나 평일 미국 동부 21:00–05:00에 실행하는 것이 NCBI 지침입니다. "
-    "24시간에 100건을 넘기면 NCBI가 느린 대기열로 옮기거나 요청을 막을 수 있습니다."
+    "24시간 원격 검색이 100건을 넘기게 되면 나머지는 이 컴퓨터의 BLAST+로 실행합니다. "
+    "IP를 바꿔 한도를 피하지 않습니다. "
+    "그 이상으로 NCBI에 보내면 느린 대기열로 옮기거나 요청을 막을 수 있습니다."
 )
 
 
@@ -74,24 +76,67 @@ def next_off_hours_start(moment: datetime) -> datetime:
     return start
 
 
-def kst_night_bounds(moment: datetime) -> tuple[datetime, datetime]:
-    """그 날짜의 평일 밤 창(21:00–05:00 ET)을 한국 시간으로."""
+def _binary_edge(left: datetime, right: datetime, *, left_is_off: bool) -> datetime:
+    """left와 right 사이에서 한가한 시간이 바뀌는 시각. 결과는 분 단위."""
+    lo, hi = left, right
+    while (hi - lo) > timedelta(minutes=1):
+        mid = lo + (hi - lo) / 2
+        if is_off_hours(mid) == left_is_off:
+            lo = mid
+        else:
+            hi = mid
+    edge = hi.astimezone(ET).replace(second=0, microsecond=0)
+    # 05:00·21:00 경계로 붙인다.
+    candidates = []
+    base = edge.replace(minute=0)
+    for day in (-1, 0, 1):
+        day0 = (base + timedelta(days=day)).replace(hour=0)
+        candidates.append(day0.replace(hour=NIGHT_END_HOUR))
+        candidates.append(day0.replace(hour=NIGHT_START_HOUR))
+    return min(candidates, key=lambda item: abs((item - edge).total_seconds()))
+
+
+def off_hours_span(moment: datetime) -> tuple[datetime, datetime]:
+    """moment가 들어 있는, 또는 다음에 오는 연속 한가한 구간 (ET).
+
+    금요일 밤과 주말, 월요일 새벽은 하나의 구간이다.
+    예를 들어 서머타임에는 토요일 10:00 KST부터 월요일 18:00 KST까지 이어진다.
+    """
     et = _as_et(moment)
-    start = et.replace(hour=NIGHT_START_HOUR, minute=0, second=0, microsecond=0)
-    end = start + timedelta(hours=8)
+    step = timedelta(minutes=30)
+    if is_off_hours(et):
+        cursor = et
+        while is_off_hours(cursor - step):
+            cursor -= step
+        start = _binary_edge(cursor - step, cursor, left_is_off=False)
+    else:
+        start = next_off_hours_start(et)
+    cursor = start
+    while is_off_hours(cursor + step):
+        cursor += step
+    end = _binary_edge(cursor, cursor + step, left_is_off=True)
+    return start, end
+
+
+def kst_night_bounds(moment: datetime) -> tuple[datetime, datetime]:
+    """이어진 한가한 구간을 한국 시간으로."""
+    start, end = off_hours_span(moment)
     return start.astimezone(KST), end.astimezone(KST)
 
 
 def describe_window(moment: datetime | None = None) -> str:
     moment = moment or datetime.now(ET)
-    kst_start, kst_end = kst_night_bounds(moment)
+    start, end = off_hours_span(moment)
+    kst_start, kst_end = start.astimezone(KST), end.astimezone(KST)
+    et_start, et_end = start.astimezone(ET), end.astimezone(ET)
     et = _as_et(moment)
     dst = et.dst() not in (None, timedelta(0))
     season = "서머타임(EDT)" if dst else "표준시(EST)"
     return (
         f"NCBI 한가한 시간: 미국 동부 주말 종일, 평일 {NIGHT_START_HOUR:02d}:00–"
         f"{NIGHT_END_HOUR:02d}:00 ({season}). "
-        f"같은 창을 한국 시간으로 보면 {kst_start:%m-%d %H:%M}–{kst_end:%m-%d %H:%M} KST 입니다."
+        f"지금 기준으로 이어진 구간은 {et_start:%m-%d %H:%M}–{et_end:%m-%d %H:%M} ET, "
+        f"한국 시간 {kst_start:%m-%d %H:%M}–{kst_end:%m-%d %H:%M} KST 입니다."
     )
 
 
@@ -162,6 +207,19 @@ class SubmissionPlan:
     searches: int
     warnings: list[str] = field(default_factory=list)
     wait_until: datetime | None = None
+
+
+def remote_batch_budget(used: int, n_batches: int, limit: int = DAILY_SOFT_LIMIT, backend: str = "auto") -> int:
+    """앞으로 원격 RID로 보낼 수 있는 묶음 수.
+
+    한 번 더 제출하면 24시간 합계가 ``limit`` 을 넘을 때부터는 0이다.
+    ``remote`` 는 호출자가 원격만 쓰라고 한 경우이고, ``local`` 은 전부 로컬이다.
+    """
+    if backend == "local":
+        return 0
+    if backend == "remote":
+        return n_batches
+    return min(n_batches, max(0, int(limit) - int(used)))
 
 
 def plan_submission(
