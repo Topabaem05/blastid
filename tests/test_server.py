@@ -1,0 +1,139 @@
+"""로컬 서버는 작업창이 넘긴 행만 받고, NCBI 고지를 보여 준다."""
+import time
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+from blastid.ncbi import TOOL_NAME, blast_identity_params
+from blastid.server import addin_dir, create_app, ensure_dev_cert, serve
+
+
+def test_dev_cert_is_created(tmp_path):
+    cert, key = ensure_dev_cert(tmp_path / "certs")
+    assert cert.exists() and key.exists()
+    assert b"BEGIN CERTIFICATE" in cert.read_bytes()
+
+
+def test_health_and_disclaimer():
+    client = TestClient(create_app())
+    health = client.get("/api/health")
+    assert health.status_code == 200
+    body = health.json()
+    assert body["ok"] is True
+    assert body["tool"] == "blastid"
+    assert "KST" in body["window"]
+    notice = client.get("/api/disclaimer").json()
+    assert "U.S. Government" in notice["en"]
+    assert "보증하지 않" in notice["ko"]
+    assert "tool=blastid" in blast_identity_params("") or TOOL_NAME == "blastid"
+    params = blast_identity_params("")
+    assert params[0] == ("tool", "blastid")
+    assert all(key != "email" for key, _ in params)
+
+
+def test_job_dry_run_lists_rows_without_ncbi(monkeypatch):
+    def boom(*_a, **_k):
+        raise AssertionError("dry-run 인데 NCBI 객체가 만들어지면 안 됩니다")
+
+    monkeypatch.setattr("blastid.pipeline.NCBI", boom)
+    client = TestClient(create_app())
+    seq = "ACGT" * 20
+    started = client.post(
+        "/api/jobs",
+        json={"rows": [{"row": 2, "id": "Synth1", "seq": seq, "bold": False, "name": ""}], "dry_run": True},
+    )
+    assert started.status_code == 200
+    job_id = started.json()["id"]
+    body = None
+    for _ in range(40):
+        body = client.get(f"/api/jobs/{job_id}").json()
+        if body["status"] in {"done", "error"}:
+            break
+        time.sleep(0.05)
+    assert body["status"] == "done", body
+    text = "\n".join(event["message"] for event in body["events"])
+    assert "Synth1" in text
+    assert body["result"]["dry_run"] is True
+    assert body["result"]["updates"] == []
+    manifest = client.get("/manifest.xml")
+    assert manifest.status_code == 200
+    assert b"TaskPaneApp" in manifest.content
+    assert b"taskpane.html" in manifest.content
+    page = client.get("/taskpane.html")
+    assert page.status_code == 200
+    assert "RID 최대 대기" in page.text
+
+
+def test_local_job_returns_template_fill(monkeypatch):
+    seq = "ACGT" * 20
+
+    def local_only(*_a, **_k):
+        return {
+            0: {
+                "rid": "local:ITS_RefSeq_Fungi",
+                "rid_url": "",
+                "backend": "local",
+                "db": "ITS_RefSeq_Fungi",
+                "source": "로컬 BLAST+ (ITS_RefSeq_Fungi)",
+                "qlen": len(seq),
+                "hits": [{
+                    "name": "Pyxine testensis",
+                    "taxid": 4123,
+                    "title": "Pyxine testensis",
+                    "max_s": "300",
+                    "total_s": "300",
+                    "qc_s": "100%",
+                    "e_s": "0.0",
+                    "pi_s": "100.00%",
+                    "acc_len": len(seq),
+                    "accession": "SYN1.1",
+                    "max": 300,
+                    "total": 300,
+                    "qc": 1,
+                    "evalue": 0,
+                    "pi": 1,
+                }],
+                "lineage": "Fungi",
+                "params": {},
+            }
+        }
+
+    monkeypatch.setattr("blastid.pipeline.run_blast", local_only)
+
+    def no_network(_self, _ids):
+        return {}
+
+    monkeypatch.setattr("blastid.ncbi.NCBI.taxonomy", no_network)
+    client = TestClient(create_app())
+    started = client.post(
+        "/api/jobs",
+        json={"rows": [{"row": 2, "id": "Synth1", "seq": seq, "bold": False, "name": ""}], "backend": "local"},
+    )
+    assert started.status_code == 200
+    body = None
+    for _ in range(40):
+        body = client.get(f"/api/jobs/{started.json()['id']}").json()
+        if body["status"] in {"done", "error"}:
+            break
+        time.sleep(0.05)
+    assert body["status"] == "done", body
+    update = body["result"]["updates"][0]
+    assert update["backend"] == "local"
+    assert update["fill"] == "D6E3F0"
+
+
+def test_missing_addin_fails_at_startup(monkeypatch):
+    monkeypatch.delenv("BLASTID_ADDIN", raising=False)
+    real = Path.is_file
+
+    def hidden(self):
+        if self.name == "taskpane.html":
+            return False
+        return real(self)
+
+    monkeypatch.setattr(Path, "is_file", hidden)
+    with pytest.raises(RuntimeError, match="taskpane.html"):
+        addin_dir()
+    with pytest.raises(SystemExit, match="taskpane.html"):
+        serve()

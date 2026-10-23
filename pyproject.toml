@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "blastid"
+version = "1.1.0"
+description = "NCBI BLAST ITS identification for lichen and fungal Sanger reads"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Topabaem05" }]
+keywords = ["blast", "its", "lichen", "sanger", "ncbi"]
+dependencies = [
+  "biopython>=1.81",
+  "openpyxl>=3.1",
+  "PyYAML>=6",
+  "matplotlib>=3.7",
+  "Pillow>=10",
+  "fastapi>=0.110",
+  "uvicorn>=0.27",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "httpx>=0.27", "setuptools>=68", "wheel"]
+
+[project.scripts]
+blastid = "blastid.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+blastid = [
+  "data/*.yaml",
+  "data/*.xlsx",
+  "addin/*.html",
+  "addin/*.js",
+  "addin/*.css",
+  "addin/*.xml",
+  "addin/assets/*.png",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = [
+  "live: calls NCBI (off unless -m live and BLASTID_LIVE_XLSX is set)",
+]
+addopts = ["-m", "not live"]
