@@ -69,15 +69,14 @@ class NCBI:
         except ImportError as e:
             raise SystemExit("Biopython이 필요합니다: pip install biopython") from e
         Entrez.tool = TOOL_NAME
-        if self.email:
-            Entrez.email = self.email
-        if self.api_key:
-            Entrez.api_key = self.api_key
+        # 환경변수가 없으면 이전에 프로세스에 남아 있던 값도 보내지 않는다.
+        Entrez.email = self.email or None
+        Entrez.api_key = self.api_key or None
         self.Entrez = Entrez
         if not self.email:
             import warnings
 
-            warnings.filterwarnings("ignore", message=".*[Ee]mail.*", module="Bio.Entrez")
+            warnings.filterwarnings("ignore", category=UserWarning, module=r"Bio\.Entrez")
 
     def _req(self, params, post=False, timeout=180, tries=4) -> str:
         params = list(params) + blast_identity_params()

@@ -267,6 +267,18 @@ def test_blast_request_omits_email_unless_env(monkeypatch):
     assert "FILTER=L" in body and "FILTER=m" in body
     assert "GAPCOSTS=0+0" in body or "GAPCOSTS=0%200" in body or "GAPCOSTS=0 0" in body
 
+    import warnings
+    from Bio import Entrez
+
+    Entrez.email = "leftover@example.com"
+    Entrez.api_key = "leftover-key"
+    ncbi_clear = NCBI(log=lambda *_: None)
+    assert ncbi_clear.Entrez.email is None
+    assert ncbi_clear.Entrez.api_key is None
+    with warnings.catch_warnings(record=True) as caught:
+        Entrez._construct_params({})
+    assert not any("mail" in str(w.message).lower() for w in caught)
+
     monkeypatch.setenv("NCBI_EMAIL", "person@example.com")
     monkeypatch.setenv("NCBI_API_KEY", "secret-key")
     params = blast_identity_params()
