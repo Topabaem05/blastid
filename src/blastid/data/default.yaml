@@ -1,0 +1,163 @@
+# blastid 기본 출력 템플릿.
+# 열 순서는 이 파일의 columns 순서이고, 기존 엑셀에 쓸 때는 글자(header/aliases)로 열을 찾습니다.
+# 칸 서식·색은 style 과 각 열의 number_format 을 바꿉니다.
+# 쓸 수 있는 field 목록은 README 의 "템플릿 필드" 를 보세요.
+version: 1
+sheet: Sheet1
+screenshot_sheet: 스크린샷
+header_row: 1
+freeze: D2
+row_height: 30
+header_height: 32
+autofilter: true
+bold_field: id
+empty_field: scientific_name
+id_field: id
+sequence_field: sequence
+comment_field: comment
+screenshot_field: screenshot
+workbook: default.xlsx
+style:
+  header_fill: "1F4E78"
+  header_font: "FFFFFF"
+  header_size: 11
+  band_fill: "EEF3F8"
+  result_fill: "E2EFDA"
+  strange_fill: "F8CBAD"
+  ambiguous_fill: "FFF2CC"
+  border: "BFBFBF"
+  link_font: "0563C1"
+columns:
+  - header: "No"
+    field: no
+    width: 6
+    role: input
+  - header: "Collection No."
+    width: 14
+    role: input
+  - header: "ID(Voucher)"
+    field: id
+    width: 16
+    role: input
+    aliases: ["ID", "Voucher", "시료번호", "Sample", "Sample ID"]
+  - header: "Lichen name(1차 가동정)"
+    width: 22
+    role: input
+  - header: "Substratum"
+    width: 12
+    role: input
+  - header: "과제"
+    width: 14
+    role: input
+  - header: "ELF"
+    width: 10
+    role: input
+  - header: "납품"
+    width: 8
+    role: input
+  - header: "DNA"
+    width: 8
+    role: input
+  - header: "Seq"
+    field: sequence
+    width: 18
+    role: input
+    wrap: true
+    aliases: ["Sequence", "서열", "ITS", "ITS sequence", "Query"]
+  - header: "Scientific Name"
+    field: scientific_name
+    width: 28
+    role: result
+    wrap: true
+    aliases: ["ScientificName", "학명", "Species"]
+  - header: "Max Score"
+    field: max_score
+    width: 12
+    role: result
+    aliases: ["MaxScore"]
+  - header: "Total Score"
+    field: total_score
+    width: 12
+    role: result
+    aliases: ["TotalScore"]
+  - header: "Query Cover"
+    field: query_cover
+    number_format: "0%"
+    width: 12
+    role: result
+    aliases: ["Query cover", "Cover"]
+  - header: "E value"
+    field: evalue
+    width: 12
+    role: result
+    aliases: ["E-value", "Evalue"]
+  - header: "Per. Ident"
+    field: per_ident
+    number_format: "0.00%"
+    width: 12
+    role: result
+    aliases: ["Per.Ident", "Ident", "Identity", "Per Ident"]
+  - header: "Acc. Len"
+    field: acc_len
+    width: 10
+    role: result
+    aliases: ["Acc len", "Length"]
+  - header: "Accession"
+    field: accession
+    width: 16
+    role: result
+  - header: "Lineage"
+    field: lineage
+    width: 60
+    role: result
+    wrap: true
+  - header: "검토 코멘트 / 스크린샷"
+    field: comment
+    width: 60
+    role: result
+    wrap: true
+    aliases: ["검토 코멘트", "Comment", "코멘트", "검토코멘트"]
+  - header: "스크린샷 (링크)"
+    field: screenshot
+    width: 20
+    role: result
+    aliases: ["스크린샷", "스크린샷 link", "Screenshot"]
+
+# 합침 통계를 엑셀에도 남기려면 아래 주석을 지우고 columns 에 넣으세요.
+# - header: "합침"
+#   field: merge_mode
+#   width: 12
+#   role: meta
+# - header: "겹침(bp)"
+#   field: overlap_len
+#   width: 12
+#   role: meta
+# - header: "겹침 일치도"
+#   field: overlap_ident
+#   number_format: "0.00%"
+#   width: 12
+#   role: meta
+# - header: "충돌"
+#   field: n_conflicts
+#   width: 8
+#   role: meta
+# - header: "모호염기"
+#   field: n_ambiguities
+#   width: 10
+#   role: meta
+# - header: "트리밍 길이"
+#   field: trimmed_len
+#   width: 12
+#   role: meta
+# - header: "평균 Q"
+#   field: trim_mean_q
+#   width: 10
+#   role: meta
+# - header: "RID"
+#   field: rid
+#   width: 14
+#   role: meta
+# - header: "RID 링크"
+#   field: rid_url
+#   width: 18
+#   role: meta
